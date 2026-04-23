@@ -34,7 +34,7 @@ These apply ALWAYS. Not suggestions.
 
 4. **ALWAYS `quest_journal` OR `lore_inscribe` findings.** Task-scoped → journal. Transcends the task → lore. The test: *would a future agent on a different quest need this?*
 
-5. **ALWAYS pass `report` to `quest_clear`.** Required. Be specific: commit hash, files, remaining issues. "Done" is not a report.
+5. **ALWAYS pass `report` to `quest_clear`.** Required. Be specific: what changed, what remains, any blockers. "Done" is not a report.
 
 6. **Capture principles IMMEDIATELY when the human corrects you.** Before anything else, `lore_inscribe(kind="principle", ...)`. Principles auto-load into every future session's oath — this is how the correction sticks permanently.
 
@@ -50,7 +50,7 @@ These apply ALWAYS. Not suggestions.
 
 10. **Don't lore what's already in quest.** If it dies when the quest clears, it's a `quest_journal` entry, not `lore_inscribe`.
 
-11. **If grep can find it, it doesn't belong in lore.** Lore is for insights and principles no file search can surface. Don't index files — inscribe knowledge.
+11. **If a search can find it, it doesn't belong in lore.** Lore is for insights and principles no search can surface. Don't index project content — inscribe knowledge.
 
 12. **Don't ask permission for obvious entries.** Just inscribe. The human reviews via `lore_list` later.
 
@@ -107,9 +107,9 @@ A principle is a kind of lore entry (kind=principle). The oath is the rendered l
 
 **Principles MUST be ≤60 words** (title + summary combined). Long principles bloat every future session's oath and cost tokens forever. Anything longer is a *decision* in disguise — inscribe it as `kind=decision` and write a short principle that links to it via `lore_link`.
 
-**Lore summaries DISTILL the durable choice.** Implementation detail goes in the quest acceptance that prompted the inscription — not in the lore summary. A decision entry answers "what was decided and why" in 3–5 sentences; the acceptance bullets of the quest that triggered it carry the how.
+**Lore summaries DISTILL the durable choice.** Detail goes in the quest acceptance that prompted the inscription — not in the lore summary. A decision entry answers "what was decided and why" in 3–5 sentences; the acceptance bullets of the quest that triggered it carry the how.
 
-**Transfer reasoning lives in the lore summary; project artifacts carry implementation detail.** When a new entry cites an ancestor via `informs`, the summary must name the transfer in 1–3 sentences — why the ancestor applies HERE (delta, inversion, adoption, or triviality). Longer-form project artifacts — plan docs, PR descriptions, chapter drafts, research notes, spec outlines, whatever fits your project — carry deeper context, examples, and detail. Trivial transfers (same approach, no delta) get brief cites, but the brief cite still names the triviality in one clause. A bare "adopts LORE-N, same rationale applies" with no articulation of why it transfers is a rubber-stamp, not a cite — the lore body must stand alone as reasoning.
+**Transfer reasoning lives in the lore summary; project artifacts carry the detail.** When a new entry cites an ancestor via `informs`, the summary must name the transfer in 1–3 sentences — why the ancestor applies HERE (delta, inversion, adoption, or triviality). Longer-form project artifacts — plan docs, PR descriptions, chapter drafts, research notes, spec outlines, whatever fits your project — carry deeper context, examples, and detail. Trivial transfers (same approach, no delta) get brief cites, but the brief cite still names the triviality in one clause. A bare "adopts LORE-N, same rationale applies" with no articulation of why it transfers is a rubber-stamp, not a cite — the lore body must stand alone as reasoning.
 
 ## Task-shaped examples — situation → call
 

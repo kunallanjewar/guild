@@ -23,13 +23,14 @@ import (
 // direct edits to instructions.md do. See QUEST-57 for the dynamic
 // build path and its separate tests.
 //
-// Last updated for QUEST-172 follow-up: universalize the reasoning-surface
-// paragraph so the MCP contract isn't locked to software-engineering
-// vocabulary — "project artifacts" as the collective term, with
-// non-exhaustive examples (plan docs, PR descriptions, chapter drafts,
-// research notes, spec outlines) so guild's project-type-agnostic posture
-// holds for writers, researchers, PMs, etc.
-const wantStaticSHA = "fb0aa8f2b1434382b441bffb5c4e4666f79494404fce62762df42601fd5170b6"
+// Last updated for QUEST-190: broader vocabulary audit — universalize
+// four dev-coded phrases so the MCP contract is project-type-agnostic:
+// (1) Rule 5 report guidance: "commit hash, files" → "what changed, what
+// remains"; (2) Rule 11: "grep" → "a search", "index files" → "index
+// project content"; (3) lore-summaries paragraph: "Implementation detail
+// goes in" → "Detail goes in"; (4) transfer-reasoning heading: "carry
+// implementation detail" → "carry the detail".
+const wantStaticSHA = "aa9bb5392d88825eca32cca804b6e3f621267d2373bfdc96ad9f366658051a60"
 
 func TestStaticInstructions_Embedded(t *testing.T) {
 	if staticInstructions == "" {
