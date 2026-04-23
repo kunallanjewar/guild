@@ -46,48 +46,15 @@ func Fulfill(ctx context.Context, db *sql.DB, projectID, taskID, report string) 
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	// Acquire a dedicated connection and open with BEGIN IMMEDIATE.
-	// DEFERRED transactions would take a read snapshot before the first
-	// write, causing concurrent Fulfill calls to read a stale done-set
-	// and miss each other's parent→done transitions during the cascade
-	// pass. BEGIN IMMEDIATE serializes writers at lock-acquisition time
-	// so every cascade reads a fully committed done-set.
-	conn, err := db.Conn(ctx)
+	// BEGIN IMMEDIATE serializes concurrent Fulfill calls so every cascade
+	// reads a fully committed done-set rather than a stale DEFERRED snapshot.
+	conn, rollback, err := beginImmediate(ctx, db, "clear")
 	if err != nil {
-		return nil, fmt.Errorf("quest: clear: acquire conn: %w", err)
+		return nil, err
 	}
-	defer func() { _ = conn.Close() }()
-
-	const maxBeginAttempts = 20
-	var beginErr error
-	for attempt := range maxBeginAttempts {
-		_, beginErr = conn.ExecContext(ctx, "BEGIN IMMEDIATE")
-		if beginErr == nil {
-			break
-		}
-		if !isBusyErr(beginErr.Error()) {
-			return nil, fmt.Errorf("quest: clear: begin immediate: %w", beginErr)
-		}
-		// Capped linear backoff: 10ms × attempt, max 200ms.
-		base := time.Duration(attempt+1) * 10 * time.Millisecond
-		if base > 200*time.Millisecond {
-			base = 200 * time.Millisecond
-		}
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("quest: clear: begin immediate: %w", ctx.Err())
-		case <-time.After(base):
-		}
-	}
-	if beginErr != nil {
-		return nil, fmt.Errorf("quest: clear: begin immediate (contended out after %d attempts): %w", maxBeginAttempts, beginErr)
-	}
+	defer conn.Close()
 	committed := false
-	defer func() { //nolint:contextcheck // rollback must not be cancelled by a caller-cancelled ctx
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
+	defer rollback(&committed)
 
 	// Exists check — prevents silent no-op when the caller typos an id.
 	var existStatus, existOwner sql.NullString

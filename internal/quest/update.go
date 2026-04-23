@@ -73,15 +73,20 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 	agent := agentOrDefault(params.Agent)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	tx, err := db.BeginTx(ctx, nil)
+	// BEGIN IMMEDIATE serializes concurrent Update calls: reads current status,
+	// computes the new state, then writes — a stale DEFERRED snapshot could
+	// cause two goroutines to read the same status and overwrite each other.
+	conn, rollback, err := beginImmediate(ctx, db, "update")
 	if err != nil {
-		return nil, fmt.Errorf("quest: update: begin tx: %w", err)
+		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
 
 	// Exists check.
 	var existStatus sql.NullString
-	err = tx.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT status FROM task_status
 		 WHERE project_id = ? AND task_id = ?`,
 		projectID, taskID,
@@ -139,7 +144,7 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 	}
 
 	if len(appendParts) > 0 {
-		if err := insertSpecNote(ctx, tx, projectID, taskID, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, taskID, agent, now,
 			NotePrefixSpec+strings.Join(appendParts, "; ")); err != nil {
 			return nil, err
 		}
@@ -171,7 +176,7 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 		replaceParts = append(replaceParts, "files: "+joinStrip(params.ReplaceFiles))
 	}
 	if len(replaceParts) > 0 {
-		if err := insertSpecNote(ctx, tx, projectID, taskID, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, taskID, agent, now,
 			NotePrefixSpecReplace+strings.Join(replaceParts, "; ")); err != nil {
 			return nil, err
 		}
@@ -189,18 +194,18 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 		if len(crits) == 0 {
 			// Clear: emit one [spec-replace] with empty value so replay
 			// resets to [].
-			if err := insertSpecNote(ctx, tx, projectID, taskID, agent, now,
+			if err := insertSpecNote(ctx, conn, projectID, taskID, agent, now,
 				NotePrefixSpecReplace+"acceptance: "); err != nil {
 				return nil, err
 			}
 		} else {
 			// First criterion [spec-replace] resets; rest [spec] append.
-			if err := insertSpecNote(ctx, tx, projectID, taskID, agent, now,
+			if err := insertSpecNote(ctx, conn, projectID, taskID, agent, now,
 				NotePrefixSpecReplace+"acceptance: "+crits[0]); err != nil {
 				return nil, err
 			}
 			for _, c := range crits[1:] {
-				if err := insertSpecNote(ctx, tx, projectID, taskID, agent, now,
+				if err := insertSpecNote(ctx, conn, projectID, taskID, agent, now,
 					NotePrefixSpec+"acceptance: "+c); err != nil {
 					return nil, err
 				}
@@ -213,7 +218,7 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 			if c == "" {
 				continue
 			}
-			if err := insertSpecNote(ctx, tx, projectID, taskID, agent, now,
+			if err := insertSpecNote(ctx, conn, projectID, taskID, agent, now,
 				NotePrefixSpec+"acceptance: "+c); err != nil {
 				return nil, err
 			}
@@ -229,14 +234,14 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 		len(params.ReplaceDependsOn) > 0 ||
 		params.ClearDependsOn
 	if depsTouched {
-		if err := recomputeBlockedness(ctx, tx, projectID, taskID, curStatus, agent, now); err != nil {
+		if err := recomputeBlockedness(ctx, conn, projectID, taskID, curStatus, agent, now); err != nil {
 			return nil, err
 		}
 	}
 
 	// Bump updated_at so List/Scroll see the write order even when only
 	// notes changed.
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`UPDATE task_status SET updated_at = ?
 		 WHERE project_id = ? AND task_id = ?`,
 		now, projectID, taskID,
@@ -244,26 +249,19 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 		return nil, fmt.Errorf("quest: update: bump updated_at: %w", err)
 	}
 
-	if err := emitEvent(ctx, tx, projectID, taskID, "updated", agent, "", now); err != nil {
+	if err := emitEvent(ctx, conn, projectID, taskID, "updated", agent, "", now); err != nil {
 		return nil, err
 	}
 
-	result, err := loadTx(ctx, tx, projectID, taskID)
+	result, err := loadTx(ctx, conn, projectID, taskID)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("quest: update: commit: %w", err)
 	}
+	committed = true
 	return result, nil
-}
-
-// depsAllDoneTx is the tx-taking variant of depsAllDone. Factored out
-// so both Post's and Update's dep-check paths can share it. Slightly
-// annoying dup vs the *sql.Tx variant in post.go — when the Tx and DB
-// variants diverge we'll split them, but today they're identical.
-func depsAllDoneTx(ctx context.Context, tx *sql.Tx, projectID string, depIDs []string) (bool, error) {
-	return depsAllDone(ctx, tx, projectID, depIDs)
 }
 
 // recomputeBlockedness flips taskID between 'blocked' and 'next' based
@@ -286,7 +284,7 @@ func depsAllDoneTx(ctx context.Context, tx *sql.Tx, projectID string, depIDs []s
 // Cascade note: this helper does NOT walk `blocks` edges. An Update
 // that unblocks B doesn't make B 'done', so no quest waiting on B's
 // completion changes state. Cascade-through-done is Fulfill's job.
-func recomputeBlockedness(ctx context.Context, tx *sql.Tx, projectID, taskID string, curStatus Status, agent, now string) error {
+func recomputeBlockedness(ctx context.Context, tx dbTx, projectID, taskID string, curStatus Status, agent, now string) error {
 	if curStatus == StatusDone {
 		return nil
 	}
@@ -294,7 +292,7 @@ func recomputeBlockedness(ctx context.Context, tx *sql.Tx, projectID, taskID str
 	if err != nil {
 		return fmt.Errorf("quest: update: recompute deps: %w", err)
 	}
-	allDone, err := depsAllDoneTx(ctx, tx, projectID, spec.DependsOn)
+	allDone, err := depsAllDone(ctx, tx, projectID, spec.DependsOn)
 	if err != nil {
 		return err
 	}

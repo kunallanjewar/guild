@@ -52,13 +52,19 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 	agent := agentOrDefault(params.Agent)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	tx, err := db.BeginTx(ctx, nil)
+	// BEGIN IMMEDIATE serializes concurrent Post calls so nextQuestID's
+	// MAX(id) scan and the subsequent INSERT see the same committed state
+	// (DEFERRED would read a stale snapshot and could produce duplicate IDs
+	// under contention, relying on the PK to reject the second writer).
+	conn, rollback, err := beginImmediate(ctx, db, "post")
 	if err != nil {
-		return nil, fmt.Errorf("quest: post: begin tx: %w", err)
+		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
 
-	newID, err := nextQuestID(ctx, tx, projectID)
+	newID, err := nextQuestID(ctx, conn, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +81,7 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 
 	initialStatus := StatusNext
 	if len(depIDs) > 0 {
-		allDone, err := depsAllDone(ctx, tx, projectID, depIDs)
+		allDone, err := depsAllDone(ctx, conn, projectID, depIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +91,7 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 	}
 
 	// Insert task_status row.
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO task_status (project_id, task_id, status, updated_at)
 		 VALUES (?, ?, ?, ?)`,
 		projectID, newID, string(initialStatus), now,
@@ -105,7 +111,7 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 	if e := strings.TrimSpace(params.Effort); e != "" {
 		scalarParts = append(scalarParts, "effort: "+e)
 	}
-	if err := insertSpecNote(ctx, tx, projectID, newID, agent, now,
+	if err := insertSpecNote(ctx, conn, projectID, newID, agent, now,
 		NotePrefixSpec+strings.Join(scalarParts, "; ")); err != nil {
 		return nil, err
 	}
@@ -113,13 +119,13 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 	// List fields — separate note each. files/depends_on comma-join on
 	// one line; acceptance is one note per criterion.
 	if len(params.Files) > 0 {
-		if err := insertSpecNote(ctx, tx, projectID, newID, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, newID, agent, now,
 			NotePrefixSpec+"files: "+joinStrip(params.Files)); err != nil {
 			return nil, err
 		}
 	}
 	if len(depIDs) > 0 {
-		if err := insertSpecNote(ctx, tx, projectID, newID, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, newID, agent, now,
 			NotePrefixSpec+"depends_on: "+strings.Join(depIDs, ", ")); err != nil {
 			return nil, err
 		}
@@ -129,32 +135,33 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 		if crit == "" {
 			continue
 		}
-		if err := insertSpecNote(ctx, tx, projectID, newID, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, newID, agent, now,
 			NotePrefixSpec+"acceptance: "+crit); err != nil {
 			return nil, err
 		}
 	}
 	if rework := strings.TrimSpace(params.ReworkOf); rework != "" {
 		rework = strings.ToUpper(rework)
-		if err := insertSpecNote(ctx, tx, projectID, newID, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, newID, agent, now,
 			NotePrefixRework+rework); err != nil {
 			return nil, err
 		}
 	}
 
 	// `created` event (for scroll/pulse). data = subject.
-	if err := emitEvent(ctx, tx, projectID, newID, EventCreated, agent, params.Subject, now); err != nil {
+	if err := emitEvent(ctx, conn, projectID, newID, EventCreated, agent, params.Subject, now); err != nil {
 		return nil, err
 	}
 
-	result, err := loadTx(ctx, tx, projectID, newID)
+	result, err := loadTx(ctx, conn, projectID, newID)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("quest: post: commit: %w", err)
 	}
+	committed = true
 	return result, nil
 }
 
@@ -163,7 +170,7 @@ func Post(ctx context.Context, db *sql.DB, projectID string, params PostParams) 
 // concurrent Post calls in two goroutines can't pick the same id (the
 // task_status PRIMARY KEY would reject the second anyway, but computing
 // the id inside the tx also prevents a spurious error-before-commit).
-func nextQuestID(ctx context.Context, tx *sql.Tx, projectID string) (string, error) {
+func nextQuestID(ctx context.Context, tx dbTx, projectID string) (string, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT task_id FROM task_status WHERE project_id = ?`,
 		projectID,
@@ -205,7 +212,7 @@ func nextQuestID(ctx context.Context, tx *sql.Tx, projectID string) (string, err
 // placeholder construction that sqlcheck flags as a possible
 // SQL-injection vector, even though the only strings concatenated
 // would be literal "?,"s. Cleaner to remove the flag entirely.
-func depsAllDone(ctx context.Context, tx *sql.Tx, projectID string, depIDs []string) (bool, error) {
+func depsAllDone(ctx context.Context, tx dbTx, projectID string, depIDs []string) (bool, error) {
 	if len(depIDs) == 0 {
 		return true, nil
 	}

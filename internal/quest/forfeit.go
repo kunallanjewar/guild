@@ -37,14 +37,19 @@ func Forfeit(ctx context.Context, db *sql.DB, projectID, taskID, note string) (*
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	tx, err := db.BeginTx(ctx, nil)
+	// BEGIN IMMEDIATE serializes concurrent Forfeit calls: reads current status
+	// and claimed_by, then writes the release — a stale DEFERRED snapshot could
+	// cause two goroutines to both read in_progress and both execute the release.
+	conn, rollback, err := beginImmediate(ctx, db, "forfeit")
 	if err != nil {
-		return nil, fmt.Errorf("quest: forfeit: begin tx: %w", err)
+		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
 
 	var existStatus, existOwner sql.NullString
-	err = tx.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT status, claimed_by FROM task_status
 		 WHERE project_id = ? AND task_id = ?`,
 		projectID, taskID,
@@ -64,13 +69,14 @@ func Forfeit(ctx context.Context, db *sql.DB, projectID, taskID, note string) (*
 	default:
 		// next / blocked / anything else → no-op. Load the quest for
 		// the return value but do not touch task_status / task_events.
-		q, err := loadTx(ctx, tx, projectID, taskID)
+		q, err := loadTx(ctx, conn, projectID, taskID)
 		if err != nil {
 			return nil, err
 		}
-		if err := tx.Commit(); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return nil, fmt.Errorf("quest: forfeit: commit: %w", err)
 		}
+		committed = true
 		return &ForfeitResult{Quest: q, AlreadyNext: true}, nil
 	}
 
@@ -82,7 +88,7 @@ func Forfeit(ctx context.Context, db *sql.DB, projectID, taskID, note string) (*
 	// Optional note attached first so the `[released]` note precedes
 	// any downstream pulse queries that scan forward-in-time.
 	if n := strings.TrimSpace(note); n != "" {
-		if _, err := tx.ExecContext(ctx,
+		if _, err := conn.ExecContext(ctx,
 			`INSERT INTO task_notes (project_id, task_id, agent_id, note, created_at)
 			 VALUES (?, ?, ?, ?, ?)`,
 			projectID, taskID, owner, "[released] "+n, now,
@@ -91,7 +97,7 @@ func Forfeit(ctx context.Context, db *sql.DB, projectID, taskID, note string) (*
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`UPDATE task_status
 		 SET status = 'next',
 		     claimed_by = NULL,
@@ -103,16 +109,17 @@ func Forfeit(ctx context.Context, db *sql.DB, projectID, taskID, note string) (*
 		return nil, fmt.Errorf("quest: forfeit: update: %w", err)
 	}
 
-	if err := emitEvent(ctx, tx, projectID, taskID, "released", owner, note, now); err != nil {
+	if err := emitEvent(ctx, conn, projectID, taskID, "released", owner, note, now); err != nil {
 		return nil, err
 	}
 
-	result, err := loadTx(ctx, tx, projectID, taskID)
+	result, err := loadTx(ctx, conn, projectID, taskID)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("quest: forfeit: commit: %w", err)
 	}
+	committed = true
 	return &ForfeitResult{Quest: result}, nil
 }
