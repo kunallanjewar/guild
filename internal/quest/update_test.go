@@ -148,6 +148,121 @@ func TestUpdate_AutoBlockOnNewDep(t *testing.T) {
 	}
 }
 
+// TestUpdate_AutoUnblock_FulfillDepPath is the QUEST-147 fulfill-dep
+// regression: B is blocked via Update-added dep on A; when A is
+// fulfilled the cascade (not the Update recompute path) flips B.
+// This path was already covered by TestUpdate_AutoBlockOnNewDep; the
+// explicit assertion here guards the post-fix blocked→next transition
+// path reported by the `Update` recompute helper stays compatible with
+// the cascade helper (both use EventUnblocked).
+func TestUpdate_AutoUnblock_FulfillDepPath(t *testing.T) {
+	db, pid := newTestDB(t)
+	ctx := context.Background()
+	a := mustPost(t, db, pid, PostParams{Subject: "A"})
+	b := mustPost(t, db, pid, PostParams{Subject: "B"})
+
+	if _, err := Update(ctx, db, pid, b.ID, UpdateParams{DependsOn: []string{a.ID}}); err != nil {
+		t.Fatalf("Update add dep: %v", err)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusBlocked {
+		t.Fatalf("B status = %s, want blocked before A fulfilled", s)
+	}
+
+	res, err := Fulfill(ctx, db, pid, a.ID, "done-reason")
+	if err != nil {
+		t.Fatalf("Fulfill A: %v", err)
+	}
+	if len(res.Unblocked) != 1 || res.Unblocked[0].ID != b.ID {
+		t.Fatalf("Fulfill unblocked = %v, want [%s]", idsOf(res.Unblocked), b.ID)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusNext {
+		t.Errorf("B status = %s, want next after A fulfilled", s)
+	}
+}
+
+// TestUpdate_AutoUnblock_ClearDependsOnPath is the QUEST-147 core
+// regression: an agent posts B depending on A, realizes the dep was
+// wrong, and clears it. Before the fix, B stayed 'blocked' even with
+// zero deps on the canonical list — the agent's only recourse was
+// raw-SQL surgery, violating the no-SQL-bypass oath.
+func TestUpdate_AutoUnblock_ClearDependsOnPath(t *testing.T) {
+	db, pid := newTestDB(t)
+	ctx := context.Background()
+	a := mustPost(t, db, pid, PostParams{Subject: "A"})
+	b := mustPost(t, db, pid, PostParams{Subject: "B"})
+
+	if _, err := Update(ctx, db, pid, b.ID, UpdateParams{DependsOn: []string{a.ID}}); err != nil {
+		t.Fatalf("Update add dep: %v", err)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusBlocked {
+		t.Fatalf("B status = %s, want blocked before clear", s)
+	}
+
+	// Clear B's deps while A is still not done — B must still unblock
+	// because the canonical dep list is now empty.
+	if _, err := Update(ctx, db, pid, b.ID, UpdateParams{ClearDependsOn: true}); err != nil {
+		t.Fatalf("Update clear deps: %v", err)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusNext {
+		t.Errorf("B status = %s, want next after clearing deps (was blocked, now 0 deps)", s)
+	}
+	reloaded := mustLoad(t, db, pid, b.ID)
+	if len(reloaded.DependsOn) != 0 {
+		t.Errorf("B deps = %v, want empty after ClearDependsOn", reloaded.DependsOn)
+	}
+}
+
+// TestUpdate_AutoUnblock_ReplaceDependsOnPath exercises the replace
+// form of the same fix: swapping a not-done dep set for a done-or-empty
+// dep set must flip blocked→next. Uses a 3-quest graph so the test also
+// asserts that cascade-through-multiple-deps is honored — when the new
+// dep set contains a not-done entry, B stays blocked.
+func TestUpdate_AutoUnblock_ReplaceDependsOnPath(t *testing.T) {
+	db, pid := newTestDB(t)
+	ctx := context.Background()
+	a := mustPost(t, db, pid, PostParams{Subject: "A"})
+	c := mustPost(t, db, pid, PostParams{Subject: "C"})
+	d := mustPost(t, db, pid, PostParams{Subject: "D"})
+	b := mustPost(t, db, pid, PostParams{Subject: "B"})
+
+	// B blocked on A.
+	if _, err := Update(ctx, db, pid, b.ID, UpdateParams{DependsOn: []string{a.ID}}); err != nil {
+		t.Fatalf("Update add dep A: %v", err)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusBlocked {
+		t.Fatalf("B status = %s, want blocked", s)
+	}
+
+	// Fulfill C (done) but not D.
+	if _, err := Fulfill(ctx, db, pid, c.ID, ""); err != nil {
+		t.Fatalf("Fulfill C: %v", err)
+	}
+
+	// Replace deps with [C, D] — D is not done, so B must STAY blocked.
+	if _, err := Update(ctx, db, pid, b.ID, UpdateParams{
+		ReplaceDependsOn: []string{c.ID, d.ID},
+	}); err != nil {
+		t.Fatalf("Update replace deps [C,D]: %v", err)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusBlocked {
+		t.Errorf("B status = %s, want blocked (D not done)", s)
+	}
+
+	// Replace deps with just [C] — C is done, so B must unblock.
+	if _, err := Update(ctx, db, pid, b.ID, UpdateParams{
+		ReplaceDependsOn: []string{c.ID},
+	}); err != nil {
+		t.Fatalf("Update replace deps [C]: %v", err)
+	}
+	if s := mustStatus(t, db, pid, b.ID); s != StatusNext {
+		t.Errorf("B status = %s, want next (replaced deps all done)", s)
+	}
+	reloaded := mustLoad(t, db, pid, b.ID)
+	if len(reloaded.DependsOn) != 1 || reloaded.DependsOn[0] != c.ID {
+		t.Errorf("B deps = %v, want [%s]", reloaded.DependsOn, c.ID)
+	}
+}
+
 func TestUpdate_ClearAcceptance(t *testing.T) {
 	db, pid := newTestDB(t)
 	q := mustPost(t, db, pid, PostParams{

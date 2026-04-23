@@ -220,27 +220,17 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 		}
 	}
 
-	// Auto-block on new deps.
-	depIDsForBlockCheck := append([]string{}, newDepIDs...)
-	depIDsForBlockCheck = append(depIDsForBlockCheck, replaceDepIDs...)
-	if len(depIDsForBlockCheck) > 0 && curStatus != StatusDone && curStatus != StatusBlocked {
-		allDone, err := depsAllDoneTx(ctx, tx, projectID, depIDsForBlockCheck)
-		if err != nil {
+	// Recompute blockedness symmetrically when this call touched deps.
+	// The auto-block half was original; the auto-unblock half fixes
+	// QUEST-147 — clearing or replacing deps on a blocked quest used to
+	// leave status='blocked' even after every dep was satisfied, stranding
+	// the quest and tempting agents to raw-SQL unstick it.
+	depsTouched := len(newDepIDs) > 0 ||
+		len(params.ReplaceDependsOn) > 0 ||
+		params.ClearDependsOn
+	if depsTouched {
+		if err := recomputeBlockedness(ctx, tx, projectID, taskID, curStatus, agent, now); err != nil {
 			return nil, err
-		}
-		if !allDone {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE task_status
-				 SET status = 'blocked', updated_at = ?
-				 WHERE project_id = ? AND task_id = ?`,
-				now, projectID, taskID,
-			); err != nil {
-				return nil, fmt.Errorf("quest: update: auto-block: %w", err)
-			}
-			if err := emitEvent(ctx, tx, projectID, taskID, "blocked", agent,
-				"blocked by: "+strings.Join(depIDsForBlockCheck, ", "), now); err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -274,4 +264,63 @@ func Update(ctx context.Context, db *sql.DB, projectID, taskID string, params Up
 // variants diverge we'll split them, but today they're identical.
 func depsAllDoneTx(ctx context.Context, tx *sql.Tx, projectID string, depIDs []string) (bool, error) {
 	return depsAllDone(ctx, tx, projectID, depIDs)
+}
+
+// recomputeBlockedness flips taskID between 'blocked' and 'next' based
+// on the canonical depends_on set after Update's spec notes have been
+// written. Must be called AFTER the spec-note inserts so loadSpec
+// observes the resulting dep list (append+replace+clear already
+// applied).
+//
+// Transition table (curStatus → action):
+//
+//	next, in_progress → 'blocked' if any current dep is not done
+//	blocked           → 'next'    if every current dep is done (or none)
+//	done              → no-op (terminal)
+//
+// Only the status flip path that differs from the current state emits
+// an event — a no-op recompute is silent. The blocked→next direction
+// reuses EventUnblocked so pulse/scroll view the two unblock paths
+// (Fulfill cascade + Update recompute) consistently.
+//
+// Cascade note: this helper does NOT walk `blocks` edges. An Update
+// that unblocks B doesn't make B 'done', so no quest waiting on B's
+// completion changes state. Cascade-through-done is Fulfill's job.
+func recomputeBlockedness(ctx context.Context, tx *sql.Tx, projectID, taskID string, curStatus Status, agent, now string) error {
+	if curStatus == StatusDone {
+		return nil
+	}
+	spec, err := loadSpec(ctx, tx, projectID, taskID)
+	if err != nil {
+		return fmt.Errorf("quest: update: recompute deps: %w", err)
+	}
+	allDone, err := depsAllDoneTx(ctx, tx, projectID, spec.DependsOn)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !allDone && curStatus != StatusBlocked:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE task_status
+			 SET status = 'blocked', updated_at = ?
+			 WHERE project_id = ? AND task_id = ?`,
+			now, projectID, taskID,
+		); err != nil {
+			return fmt.Errorf("quest: update: auto-block: %w", err)
+		}
+		return emitEvent(ctx, tx, projectID, taskID, "blocked", agent,
+			"blocked by: "+strings.Join(spec.DependsOn, ", "), now)
+	case allDone && curStatus == StatusBlocked:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE task_status
+			 SET status = 'next', updated_at = ?
+			 WHERE project_id = ? AND task_id = ? AND status = 'blocked'`,
+			now, projectID, taskID,
+		); err != nil {
+			return fmt.Errorf("quest: update: auto-unblock: %w", err)
+		}
+		return emitEvent(ctx, tx, projectID, taskID, EventUnblocked, agent,
+			"deps satisfied", now)
+	}
+	return nil
 }
