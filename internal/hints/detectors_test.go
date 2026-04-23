@@ -240,6 +240,166 @@ func TestTrigger_ClearWithoutReportDetail(t *testing.T) {
 	}
 }
 
+// TestTrigger_InscribeWithoutTransferReasoning exercises the QUEST-167
+// rule against the Spike 5 audit corpus (2026-04-22): gold-standard
+// entries must NOT fire, anti-pattern entries MUST fire, and the edge
+// cases (empty informs, very-short summary, trivial-transfer escape)
+// stay suppressed.
+func TestTrigger_InscribeWithoutTransferReasoning(t *testing.T) {
+	// Full ancestor list — real shape of the reflected []string arg.
+	informs := []string{"186"}
+
+	cases := []struct {
+		name    string
+		informs any
+		summary string
+		want    bool
+	}{
+		// --- edge cases (must NOT fire) --------------------------------
+		{
+			name:    "no informs → no fire",
+			informs: []string{},
+			summary: "pwdcheck uses stdlib flag; same rationale applies here in this body text, long enough to be meaningful",
+			want:    false,
+		},
+		{
+			name:    "nil informs → no fire",
+			informs: nil,
+			summary: "long enough summary body without any informs attached so the rule has nothing to enforce",
+			want:    false,
+		},
+		{
+			name:    "very short summary → no fire (guard)",
+			informs: informs,
+			summary: "see LORE-186",
+			want:    false,
+		},
+		{
+			name:    "trivial-transfer escape — no delta",
+			informs: informs,
+			summary: "adopts LORE-189 stdlib flag choice; same shape, no delta. Zero-dep bias preserved.",
+			want:    false,
+		},
+		{
+			name:    "trivial-transfer escape — same approach",
+			informs: informs,
+			summary: "pwdcheck uses stdlib testing only, adopted from LORE-190. same approach applied to a parallel Check() surface with no new dependency.",
+			want:    false,
+		},
+
+		// --- anti-patterns (MUST fire) ---------------------------------
+		{
+			name:    "LORE-258 anti-pattern (stdlib flag adoption, bare defer)",
+			informs: informs,
+			summary: "pwdcheck uses stdlib flag, adopted from LORE-189 (passgen). Same rationale applies: 5 flags, single command, zero-dep bias. cobra/pflag put off unless we add sub-commands or GNU-style long flags (neither in Phase 1).",
+			want:    true,
+		},
+		{
+			name:    "LORE-259 anti-pattern (stdlib testing adoption)",
+			informs: informs,
+			summary: "pwdcheck uses stdlib testing only, adopted from LORE-190 (passgen). Same rationale: table tests via t.Run cover scope, testify adds a dep for no functional gain at this size.",
+			want:    true,
+		},
+		{
+			name:    "LORE-261 anti-pattern (layout adoption, bare 'adopts')",
+			informs: informs,
+			summary: "pwdcheck uses cmd/pwdcheck/main.go (thin wire+exit-map) + internal/pwdcheck/{options,symbols,rules,check,input}. Adopts LORE-185 pattern; same rationale applies.",
+			want:    true,
+		},
+
+		// --- gold-standards (must NOT fire) ----------------------------
+		{
+			name:    "LORE-265 gold (argv-leakage inversion — 'because' marker)",
+			informs: informs,
+			summary: "LORE-186 pitfall #4 dismissed argv leakage because passgen's flags aren't secret. pwdcheck's argv positional IS a secret — users passing passwords on the CLI expose them via ps. Phase 1 mitigation: README caveat + recommend stdin for real use. No code change.",
+			want:    false,
+		},
+		{
+			name:    "LORE-278 gold (declined adoption — 'delta' marker)",
+			informs: informs,
+			summary: "Phase 2 architecture is a DELTA from LORE-185. Invariants preserved: cmd/+internal/ layout unchanged. Signature locked; main loops N times and emits results before the threshold warning.",
+			want:    false,
+		},
+		{
+			name:    "LORE-262 gold (repurposing — 'repurposed' marker)",
+			informs: informs,
+			summary: "ReadPasswords takes io.Reader for the input source. Adopts LORE-192's injection discipline repurposed from CSPRNG to input — same testability argument applies.",
+			want:    false,
+		},
+
+		// --- marker coverage (must NOT fire for each marker) -----------
+		{
+			name:    "marker: extends (boundary case)",
+			informs: informs,
+			summary: "Extends LORE-191 discipline to pwdcheck. Phase 2+ features layer on; Check() signature is locked at Phase 1 ship.",
+			want:    false,
+		},
+		{
+			name:    "marker: reverses",
+			informs: informs,
+			summary: "reverses LORE-186's dismissal because the prior domain assumption no longer holds in this binary.",
+			want:    false,
+		},
+		{
+			name:    "marker: adapts",
+			informs: informs,
+			summary: "adapts LORE-192's injection pattern to the reader side — Generate takes a Writer, Check takes a Reader; same testability rationale holds across both seams.",
+			want:    false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev := CallEvent{
+				Tool: "lore_inscribe",
+				Args: map[string]any{
+					"informs": c.informs,
+					"summary": c.summary,
+				},
+			}
+			got := triggerInscribeWithoutTransferReasoning(nil, ev)
+			if got != c.want {
+				t.Errorf("got %t, want %t — summary=%q", got, c.want, c.summary)
+			}
+		})
+	}
+}
+
+// TestTrigger_InscribeWithoutTransferReasoning_InformsShapes verifies
+// both argument shapes (typed []string from the Go handler, []any from
+// a JSON-unmarshal path) count as "informs is non-empty".
+func TestTrigger_InscribeWithoutTransferReasoning_InformsShapes(t *testing.T) {
+	summary := "pwdcheck uses stdlib flag, adopted from LORE-189. Same rationale: 5 flags, single command, zero-dep bias."
+
+	cases := []struct {
+		name    string
+		informs any
+		want    bool
+	}{
+		{"typed []string with entry", []string{"186"}, true},
+		{"typed []string empty", []string{}, false},
+		{"typed []string whitespace-only entry", []string{"  "}, false},
+		{"[]any with entry", []any{"186"}, true},
+		{"[]any empty", []any{}, false},
+		{"nil arg absent", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := map[string]any{"summary": summary}
+			if c.informs != nil {
+				args["informs"] = c.informs
+			}
+			got := triggerInscribeWithoutTransferReasoning(nil, CallEvent{
+				Tool: "lore_inscribe",
+				Args: args,
+			})
+			if got != c.want {
+				t.Errorf("got %t, want %t", got, c.want)
+			}
+		})
+	}
+}
+
 // TestTrigger_PrincipleTooLong keys on kind AND wordcount.
 func TestTrigger_PrincipleTooLong(t *testing.T) {
 	long := strings.Repeat("word ", 70) // 70 words > principleMaxWords (60)

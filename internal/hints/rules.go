@@ -33,9 +33,11 @@ type Rule struct {
 	Caveat string
 }
 
-// Definitions returns the 9 launch-set rules with their Trigger /
-// FollowThrough closures bound. The slice is constructed fresh on each
-// call — tests may mutate elements without affecting other test cases.
+// Definitions returns the active rule set (launch-9 from ENTRY-29 plus
+// inscribe-without-transfer-reasoning from QUEST-167) with their
+// Trigger / FollowThrough closures bound. The slice is constructed
+// fresh on each call — tests may mutate elements without affecting
+// other test cases.
 //
 // Rule order here is not semantically meaningful: the Engine keys on
 // Rule.ID after loading DB metadata via Store.LoadRules.
@@ -91,7 +93,7 @@ func Definitions() []Rule {
 			Caveat:        "Era-aware severity: 💡 hint on MCP, ℹ️ fyi on Bash CLI (18.7pp gap in ENTRY-29 calibration).",
 		},
 
-		// ℹ️ fyi (demote) — 3 rules.
+		// ℹ️ fyi (demote) — 4 rules.
 		{
 			ID:            "inscribe-without-appraise",
 			TriggerTool:   "lore_inscribe",
@@ -112,6 +114,13 @@ func Definitions() []Rule {
 			Trigger:       triggerPrincipleTooLong,
 			FollowThrough: followPrincipleShortened,
 			Caveat:        "Demoted to fyi; the 60-word bound mirrors lore's PrincipleMaxWordsDefault hygiene warning.",
+		},
+		{
+			ID:            "inscribe-without-transfer-reasoning",
+			TriggerTool:   "lore_inscribe",
+			Trigger:       triggerInscribeWithoutTransferReasoning,
+			FollowThrough: followLoreUpdateOrReforge,
+			Caveat:        "Enforces the LORE-312 reasoning-surface convention — lore carries transfer reasoning, project artifacts carry detail. Fyi/advisory: nudges gold-standard articulation without blocking legitimate trivial-transfer cites. Short summaries (<40 chars) and the 'no delta' / 'same shape' / 'same approach' trivial-transfer escape phrases suppress the fire.",
 		},
 	}
 }
