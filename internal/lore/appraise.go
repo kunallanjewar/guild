@@ -358,13 +358,15 @@ func bumpAccessCounters(ctx context.Context, db *sql.DB, now time.Time, results 
 	if len(results) == 0 {
 		return nil
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	conn, rollback, err := beginImmediate(ctx, db, "appraise access")
 	if err != nil {
-		return fmt.Errorf("lore: bump access: begin: %w", err)
+		return fmt.Errorf("lore: bump access: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
 
-	stmt, err := tx.PrepareContext(ctx,
+	stmt, err := conn.PrepareContext(ctx,
 		`UPDATE entries SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("lore: bump access: prepare: %w", err)
@@ -377,7 +379,11 @@ func bumpAccessCounters(ctx context.Context, db *sql.DB, now time.Time, results 
 			return fmt.Errorf("lore: bump access: exec: %w", err)
 		}
 	}
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("lore: bump access: commit: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // entryColumns is the fixed SELECT list for the `entries` table. Declared

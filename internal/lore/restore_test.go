@@ -317,3 +317,40 @@ func TestArchiveRestoreRoundTrip(t *testing.T) {
 		t.Errorf("restored title = %q; want 'Go error handling'", title)
 	}
 }
+
+func TestRestore_CanonicalizesRelativeFilePathToProjectRoot(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t, "restore-paths")
+
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot.json")
+	writeTestSnapshot(t, snapshotPath, 1, []snapshotLoreEntry{
+		{
+			ID:       1,
+			Topic:    "paths",
+			Kind:     string(KindDecision),
+			Title:    "relative path entry",
+			Summary:  "summary",
+			FilePath: "docs/decision.md",
+		},
+	}, nil)
+
+	result, err := Restore(ctx, db, "restore-paths", snapshotPath)
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if result.Imported != 1 {
+		t.Fatalf("Imported=%d, want 1", result.Imported)
+	}
+
+	var got string
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(file_path, '') FROM entries WHERE project_id = ?`,
+		"restore-paths",
+	).Scan(&got); err != nil {
+		t.Fatalf("read file_path: %v", err)
+	}
+	want := filepath.Clean("/fake/restore-paths/docs/decision.md")
+	if got != want {
+		t.Fatalf("file_path=%q, want %q", got, want)
+	}
+}

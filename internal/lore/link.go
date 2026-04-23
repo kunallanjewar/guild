@@ -64,10 +64,14 @@ func LinkEntries(ctx context.Context, db *sql.DB, fromID, toID int64, rel Relati
 	return nil
 }
 
+type entryLookup interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // requireEntryExists returns nil if id exists in entries (regardless of
 // project), or a wrapped ErrEntryNotFound otherwise. Used by Link and
 // Reforge to reject IDs before doing the mutation.
-func requireEntryExists(ctx context.Context, db *sql.DB, id int64) error {
+func requireEntryExists(ctx context.Context, db entryLookup, id int64) error {
 	var exists int
 	err := db.QueryRowContext(ctx,
 		`SELECT 1 FROM entries WHERE id = ?`, id,

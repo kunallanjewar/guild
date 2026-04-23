@@ -183,6 +183,11 @@ func Inscribe(ctx context.Context, db *sql.DB, p *InscribeParams) (*InscribeResu
 		validDays = kindValidDays(p.Kind)
 	}
 
+	filePath, err := canonicalizeProjectFilePath(ctx, db, p.ProjectID, p.FilePath)
+	if err != nil {
+		return nil, err
+	}
+
 	tags := strings.Join(p.Tags, ",")
 
 	// Prepared INSERT — fixed SQL, bound values.
@@ -197,7 +202,7 @@ func Inscribe(ctx context.Context, db *sql.DB, p *InscribeParams) (*InscribeResu
 		p.Title,
 		p.Summary,
 		nullIfEmpty(tags),
-		nullIfEmpty(p.FilePath),
+		nullIfEmpty(filePath),
 		nullIfEmpty(p.Source),
 		string(status),
 		nullIfNilInt(validDays),
@@ -222,7 +227,7 @@ func Inscribe(ctx context.Context, db *sql.DB, p *InscribeParams) (*InscribeResu
 		Title:       p.Title,
 		Summary:     p.Summary,
 		Tags:        append([]string(nil), p.Tags...),
-		FilePath:    p.FilePath,
+		FilePath:    filePath,
 		Source:      p.Source,
 		Status:      status,
 		ValidDays:   validDays,

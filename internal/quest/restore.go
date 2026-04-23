@@ -68,16 +68,18 @@ func Restore(ctx context.Context, db *sql.DB, projectID, snapshotPath string) (*
 	now := time.Now().UTC().Format(time.RFC3339)
 	result := &RestoreResult{}
 
-	tx, err := db.BeginTx(ctx, nil)
+	conn, rollback, err := beginImmediate(ctx, db, "restore")
 	if err != nil {
-		return nil, fmt.Errorf("quest: restore: begin tx: %w", err)
+		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
 
 	// --- task_status: skip existing (projectID+taskID PK) ---
 	for _, r := range snap.Quest.TaskStatus {
 		var exists int
-		err := tx.QueryRowContext(ctx,
+		err := conn.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM task_status WHERE project_id = ? AND task_id = ?`,
 			projectID, r.TaskID,
 		).Scan(&exists)
@@ -98,7 +100,7 @@ func Restore(ctx context.Context, db *sql.DB, projectID, snapshotPath string) (*
 		if r.ClaimedAt != "" {
 			claimedAt = sql.NullString{String: r.ClaimedAt, Valid: true}
 		}
-		if _, err := tx.ExecContext(ctx,
+		if _, err := conn.ExecContext(ctx,
 			`INSERT INTO task_status (project_id, task_id, status, claimed_by, claimed_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
 			projectID, r.TaskID, r.Status, claimedBy, claimedAt, updAt,
@@ -114,7 +116,7 @@ func Restore(ctx context.Context, db *sql.DB, projectID, snapshotPath string) (*
 		if createdAt == "" {
 			createdAt = now
 		}
-		if _, err := tx.ExecContext(ctx,
+		if _, err := conn.ExecContext(ctx,
 			`INSERT INTO task_notes (project_id, task_id, agent_id, note, created_at)
 			 VALUES (?, ?, ?, ?, ?)`,
 			projectID, r.TaskID, r.AgentID, r.Note, createdAt,
@@ -137,7 +139,7 @@ func Restore(ctx context.Context, db *sql.DB, projectID, snapshotPath string) (*
 		if r.Data != "" {
 			data = sql.NullString{String: r.Data, Valid: true}
 		}
-		if _, err := tx.ExecContext(ctx,
+		if _, err := conn.ExecContext(ctx,
 			`INSERT INTO task_events (project_id, task_id, event, agent_id, data, created_at)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
 			projectID, r.TaskID, r.Event, agentID, data, createdAt,
@@ -147,8 +149,9 @@ func Restore(ctx context.Context, db *sql.DB, projectID, snapshotPath string) (*
 		result.EventsImported++
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("quest: restore: commit: %w", err)
 	}
+	committed = true
 	return result, nil
 }

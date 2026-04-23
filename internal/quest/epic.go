@@ -41,11 +41,13 @@ func SetEpic(ctx context.Context, db *sql.DB, projectID, epic string, taskIDs []
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	agent := agentOrDefault("")
 
-	tx, err := db.BeginTx(ctx, nil)
+	conn, rollback, err := beginImmediate(ctx, db, "epic")
 	if err != nil {
-		return nil, fmt.Errorf("quest: epic: begin tx: %w", err)
+		return nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
 
 	for _, raw := range taskIDs {
 		tid := strings.ToUpper(strings.TrimSpace(raw))
@@ -54,7 +56,7 @@ func SetEpic(ctx context.Context, db *sql.DB, projectID, epic string, taskIDs []
 		}
 		// Existence probe.
 		var exists int
-		err := tx.QueryRowContext(ctx,
+		err := conn.QueryRowContext(ctx,
 			`SELECT 1 FROM task_status
 			 WHERE project_id = ? AND task_id = ?`,
 			projectID, tid,
@@ -66,15 +68,16 @@ func SetEpic(ctx context.Context, db *sql.DB, projectID, epic string, taskIDs []
 			}
 			return nil, fmt.Errorf("quest: epic: probe %s: %w", tid, err)
 		}
-		if err := insertSpecNote(ctx, tx, projectID, tid, agent, now,
+		if err := insertSpecNote(ctx, conn, projectID, tid, agent, now,
 			NotePrefixSpec+"epic: "+epic); err != nil {
 			return nil, err
 		}
 		result.Applied = append(result.Applied, tid)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("quest: epic: commit: %w", err)
 	}
+	committed = true
 	return result, nil
 }

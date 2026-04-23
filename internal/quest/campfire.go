@@ -55,9 +55,22 @@ func Campfire(ctx context.Context, db *sql.DB, projectID, questID string, p Camp
 
 	agent := journalAgent(p.Agent)
 
-	// Verify quest exists.
+	snapshot := buildCampfireSnapshot(p)
+	noteText := NotePrefixCheckpoint + snapshot
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	conn, rollback, err := beginImmediate(ctx, db, "campfire")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
+
+	// Verify quest exists inside the pinned transaction so the check and
+	// the note/event append share one serialized view.
 	var n int
-	err := db.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM task_status WHERE project_id = ? AND task_id = ?`,
 		projectID, questID,
 	).Scan(&n)
@@ -68,17 +81,7 @@ func Campfire(ctx context.Context, db *sql.DB, projectID, questID string, p Camp
 		return fmt.Errorf("%w: %s", ErrNotFound, questID)
 	}
 
-	snapshot := buildCampfireSnapshot(p)
-	noteText := NotePrefixCheckpoint + snapshot
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("quest: campfire: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO task_notes (project_id, task_id, agent_id, note, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		projectID, questID, agent, noteText, now,
@@ -86,13 +89,14 @@ func Campfire(ctx context.Context, db *sql.DB, projectID, questID string, p Camp
 		return fmt.Errorf("quest: campfire: insert note: %w", err)
 	}
 
-	if err := emitEvent(ctx, tx, projectID, questID, "checkpoint", agent, snapshot, now); err != nil {
+	if err := emitEvent(ctx, conn, projectID, questID, "checkpoint", agent, snapshot, now); err != nil {
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("quest: campfire: commit: %w", err)
 	}
+	committed = true
 	return nil
 }
 

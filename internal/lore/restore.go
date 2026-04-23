@@ -127,7 +127,10 @@ func restoreV1(ctx context.Context, db *sql.DB, projectID string, data []byte) (
 		}
 
 		tags := strings.TrimSpace(e.Tags)
-		filePath := strings.TrimSpace(e.FilePath)
+		filePath, err := canonicalizeProjectFilePath(ctx, db, projectID, e.FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("lore: restore v1: canonicalize file_path for entry %d: %w", oldID, err)
+		}
 		source := strings.TrimSpace(e.Source)
 		promptedBy := strings.TrimSpace(e.PromptedBy)
 

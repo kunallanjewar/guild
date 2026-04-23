@@ -36,9 +36,20 @@ func Summon(ctx context.Context, db *sql.DB, projectID, questID, targetAgent, ca
 	}
 	callerAgent = journalAgent(callerAgent)
 
-	// Verify quest exists.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	conn, rollback, err := beginImmediate(ctx, db, "summon")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
+
+	// Verify quest exists inside the pinned transaction so the validation
+	// and the ownership transfer share one serialized view.
 	var existStatus sql.NullString
-	err := db.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT status FROM task_status WHERE project_id = ? AND task_id = ?`,
 		projectID, questID,
 	).Scan(&existStatus)
@@ -49,15 +60,7 @@ func Summon(ctx context.Context, db *sql.DB, projectID, questID, targetAgent, ca
 		return fmt.Errorf("quest: summon: probe %s: %w", questID, err)
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("quest: summon: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`UPDATE task_status
 		 SET status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = ?
 		 WHERE project_id = ? AND task_id = ?`,
@@ -68,12 +71,13 @@ func Summon(ctx context.Context, db *sql.DB, projectID, questID, targetAgent, ca
 
 	// Emit an "assigned" event: data contains the assignee so Scroll
 	// can show "assigned → <agent>".
-	if err := emitEvent(ctx, tx, projectID, questID, "assigned", callerAgent, targetAgent, now); err != nil {
+	if err := emitEvent(ctx, conn, projectID, questID, "assigned", callerAgent, targetAgent, now); err != nil {
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("quest: summon: commit: %w", err)
 	}
+	committed = true
 	return nil
 }

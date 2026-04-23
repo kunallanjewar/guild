@@ -127,6 +127,28 @@ func TestInscribe_RequiresFields(t *testing.T) {
 	}
 }
 
+func TestInscribe_FilePathRelativeCanonicalizedToProjectRoot(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t, "alpha")
+
+	res, err := Inscribe(ctx, db, &InscribeParams{
+		ProjectID: "alpha",
+		Kind:      KindDecision,
+		Title:     "relative file path canonicalization",
+		Summary:   "summary body",
+		Topic:     "paths",
+		FilePath:  "docs/decision.md",
+	})
+	if err != nil {
+		t.Fatalf("Inscribe: %v", err)
+	}
+
+	want := filepath.Clean("/fake/alpha/docs/decision.md")
+	if res.Entry.FilePath != want {
+		t.Fatalf("entry file_path=%q, want %q", res.Entry.FilePath, want)
+	}
+}
+
 // TestInscribe_CrossProjectDedup_Default verifies the default behavior
 // (StrictProject=false): an entry with the same title in project BETA
 // surfaces the original ENTRY-1 (created in project ALPHA) as a dedup

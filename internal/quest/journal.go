@@ -36,9 +36,20 @@ func Journal(ctx context.Context, db *sql.DB, projectID, questID, agent, text st
 	}
 	agent = journalAgent(agent)
 
-	// Verify quest exists.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	conn, rollback, err := beginImmediate(ctx, db, "journal")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
+
+	// Verify quest exists inside the pinned transaction so the check and
+	// the note/event append share one serialized view.
 	var n int
-	err := db.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM task_status WHERE project_id = ? AND task_id = ?`,
 		projectID, questID,
 	).Scan(&n)
@@ -49,15 +60,7 @@ func Journal(ctx context.Context, db *sql.DB, projectID, questID, agent, text st
 		return fmt.Errorf("%w: %s", ErrNotFound, questID)
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("quest: journal: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO task_notes (project_id, task_id, agent_id, note, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		projectID, questID, agent, text, now,
@@ -65,13 +68,14 @@ func Journal(ctx context.Context, db *sql.DB, projectID, questID, agent, text st
 		return fmt.Errorf("quest: journal: insert note: %w", err)
 	}
 
-	if err := emitEvent(ctx, tx, projectID, questID, EventNoted, agent, text, now); err != nil {
+	if err := emitEvent(ctx, conn, projectID, questID, EventNoted, agent, text, now); err != nil {
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("quest: journal: commit: %w", err)
 	}
+	committed = true
 	return nil
 }
 

@@ -45,26 +45,26 @@ func Reforge(ctx context.Context, db *sql.DB, oldID, newID int64, now time.Time)
 		now = time.Now().UTC()
 	}
 
-	// Verify both entries exist before opening a transaction. Keeps the
-	// error case cheap; also produces clearer errors ("LORE-99 not
-	// found") than a post-rollback one.
-	if err := requireEntryExists(ctx, db, oldID); err != nil {
-		return err
-	}
-	if err := requireEntryExists(ctx, db, newID); err != nil {
-		return err
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
+	conn, rollback, err := beginImmediate(ctx, db, "reforge")
 	if err != nil {
-		return fmt.Errorf("lore: reforge: begin tx: %w", err)
+		return err
 	}
-	// Rollback is a no-op after Commit; safe to always-defer.
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
+
+	// Verify both entries exist inside the pinned transaction so the
+	// validation and the mutation share one serialized view.
+	if err := requireEntryExists(ctx, conn, oldID); err != nil {
+		return err
+	}
+	if err := requireEntryExists(ctx, conn, newID); err != nil {
+		return err
+	}
 
 	// Step 1: mark oldID superseded. Touch updated_at so the CLI study
 	// view shows when the state actually changed (not just created_at).
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`UPDATE entries
 		   SET status = 'superseded', updated_at = ?
 		 WHERE id = ?`,
@@ -84,7 +84,7 @@ func Reforge(ctx context.Context, db *sql.DB, oldID, newID int64, now time.Time)
 	// Step 2: write the provenance edge newID → oldID, relation=supersedes.
 	// INSERT OR IGNORE so repeated reforges (rare) are idempotent at the
 	// edge level — duplicate supersedes edges carry no new information.
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT OR IGNORE INTO entry_links (from_id, to_id, relation)
 		 VALUES (?, ?, 'supersedes')`,
 		newID, oldID,
@@ -92,8 +92,9 @@ func Reforge(ctx context.Context, db *sql.DB, oldID, newID int64, now time.Time)
 		return fmt.Errorf("lore: reforge: insert link: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("lore: reforge: commit: %w", err)
 	}
+	committed = true
 	return nil
 }
