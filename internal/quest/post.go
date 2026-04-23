@@ -227,7 +227,7 @@ func depsAllDone(ctx context.Context, tx *sql.Tx, projectID string, depIDs []str
 // insertSpecNote writes one row into task_notes with the given
 // pre-assembled note string. Note must already include its "[spec] " /
 // "[spec-replace] " / "[rework] of: " prefix.
-func insertSpecNote(ctx context.Context, tx *sql.Tx, projectID, taskID, agent, createdAt, note string) error {
+func insertSpecNote(ctx context.Context, tx dbTx, projectID, taskID, agent, createdAt, note string) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO task_notes (project_id, task_id, agent_id, note, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
@@ -240,7 +240,7 @@ func insertSpecNote(ctx context.Context, tx *sql.Tx, projectID, taskID, agent, c
 }
 
 // emitEvent writes one row into task_events.
-func emitEvent(ctx context.Context, tx *sql.Tx, projectID, taskID, event, agent, data, createdAt string) error {
+func emitEvent(ctx context.Context, tx dbTx, projectID, taskID, event, agent, data, createdAt string) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO task_events (project_id, task_id, event, agent_id, data, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,

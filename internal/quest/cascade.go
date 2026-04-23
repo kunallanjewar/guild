@@ -2,7 +2,6 @@ package quest
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 )
@@ -24,7 +23,7 @@ import (
 // The returned slice is sorted by task_id so the cascade order is
 // deterministic — important for the emoji output in the CLI layer and
 // for test assertions.
-func findNewlyUnblocked(ctx context.Context, tx *sql.Tx, projectID string) ([]*Quest, error) {
+func findNewlyUnblocked(ctx context.Context, tx dbTx, projectID string) ([]*Quest, error) {
 	doneSet, err := loadDoneSet(ctx, tx, projectID)
 	if err != nil {
 		return nil, err
@@ -67,7 +66,7 @@ func findNewlyUnblocked(ctx context.Context, tx *sql.Tx, projectID string) ([]*Q
 
 // loadDoneSet returns the set of task_ids in projectID with status='done'.
 // Used by findNewlyUnblocked and Post's dep check.
-func loadDoneSet(ctx context.Context, tx *sql.Tx, projectID string) (map[string]bool, error) {
+func loadDoneSet(ctx context.Context, tx dbTx, projectID string) (map[string]bool, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT task_id FROM task_status WHERE project_id = ? AND status = 'done'`,
 		projectID,
@@ -93,7 +92,7 @@ func loadDoneSet(ctx context.Context, tx *sql.Tx, projectID string) (map[string]
 
 // loadBlockedIDs returns every task_id in projectID with status='blocked',
 // sorted for determinism.
-func loadBlockedIDs(ctx context.Context, tx *sql.Tx, projectID string) ([]string, error) {
+func loadBlockedIDs(ctx context.Context, tx dbTx, projectID string) ([]string, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT task_id FROM task_status
 		 WHERE project_id = ? AND status = 'blocked'
@@ -123,7 +122,7 @@ func loadBlockedIDs(ctx context.Context, tx *sql.Tx, projectID string) ([]string
 // emits an `unblocked` event citing completedID as the cause, and
 // returns the list in the same order. Runs inside the caller's tx so
 // partial progress can't leak on failure.
-func flipToNext(ctx context.Context, tx *sql.Tx, projectID, completedID string, unblocked []*Quest, now string) error {
+func flipToNext(ctx context.Context, tx dbTx, projectID, completedID string, unblocked []*Quest, now string) error {
 	for _, q := range unblocked {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE task_status

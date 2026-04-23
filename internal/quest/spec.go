@@ -293,7 +293,7 @@ func Load(ctx context.Context, db *sql.DB, projectID, taskID string) (*Quest, er
 // loadTx is the transaction-bound form of Load used by Post/Accept/etc
 // after a write so the returned Quest reflects the in-tx state, not a
 // racing view of the db.
-func loadTx(ctx context.Context, tx *sql.Tx, projectID, taskID string) (*Quest, error) {
+func loadTx(ctx context.Context, tx queryer, projectID, taskID string) (*Quest, error) {
 	q, err := loadSpec(ctx, tx, projectID, taskID)
 	if err != nil {
 		return nil, err
@@ -309,4 +309,14 @@ func loadTx(ctx context.Context, tx *sql.Tx, projectID, taskID string) (*Quest, 
 type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// dbTx is the read+write subset of *sql.Tx and *sql.Conn. Accepting this
+// interface instead of *sql.Tx lets Fulfill pin to a *sql.Conn and issue
+// BEGIN IMMEDIATE directly, without changing the cascade-helper signatures
+// visible to other callers (which continue to pass *sql.Tx and satisfy the
+// interface implicitly).
+type dbTx interface {
+	queryer
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
