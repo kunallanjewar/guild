@@ -2,9 +2,23 @@ package lore
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 	"time"
 )
+
+// execLookPath is a thin wrapper around exec.LookPath so tests can detect
+// whether git is available without importing os/exec at the call site.
+func execLookPath(name string) (string, error) { return exec.LookPath(name) }
+
+// swapGitFileLastModifiedFn replaces the package-level seam and returns a
+// restore function. Tests call t.Cleanup(restore) to ensure the original
+// is always put back.
+func swapGitFileLastModifiedFn(fn func(context.Context, string) time.Time) func() {
+	prev := gitFileLastModifiedFn
+	gitFileLastModifiedFn = fn
+	return func() { gitFileLastModifiedFn = prev }
+}
 
 func TestEchoes_ProjectRequired(t *testing.T) {
 	ctx := context.Background()
@@ -115,5 +129,147 @@ func TestEchoes_GitAwareSkippedWhenFilePathEmpty(t *testing.T) {
 	}
 	if len(stale) != 0 {
 		t.Fatalf("expected 0 stale; got %d", len(stale))
+	}
+}
+
+// TestEchoes_GitAwareDetectsModifiedFile verifies that when the injected
+// gitFileLastModifiedFn reports a modification time after the entry's
+// created_at, the entry is flagged — regardless of the process CWD.
+func TestEchoes_GitAwareDetectsModifiedFile(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO projects (id, path) VALUES ('p','/tmp/p')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entryCreated := time.Now().UTC().AddDate(0, 0, -10)
+	fileModified := entryCreated.Add(24 * time.Hour) // file changed 1 day after the entry
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO entries (project_id, topic, kind, title, summary, status, file_path, created_at, updated_at)
+		 VALUES ('p','t','research','tracked file entry','summary','current','/some/repo/file.go',?,?)`,
+		entryCreated.Format(time.RFC3339), entryCreated.Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject a seam that reports the file was modified after the entry was
+	// created. The seam is called with the path from the DB; it must not
+	// care about or depend on the process CWD.
+	t.Cleanup(swapGitFileLastModifiedFn(func(_ context.Context, path string) time.Time {
+		if path == "/some/repo/file.go" {
+			return fileModified
+		}
+		return time.Time{}
+	}))
+
+	stale, err := Echoes(ctx, db, "p", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 {
+		t.Fatalf("want 1 stale entry; got %d: %+v", len(stale), stale)
+	}
+	if stale[0].Entry.Title != "tracked file entry" {
+		t.Fatalf("wrong entry flagged: %q", stale[0].Entry.Title)
+	}
+	if stale[0].Reason != "file modified after entry was created" {
+		t.Fatalf("unexpected reason: %q", stale[0].Reason)
+	}
+}
+
+// TestEchoes_GitAwareNotFlaggedWhenFileUnmodified verifies that an entry
+// is not flagged when the injected fn reports the file's last-modified
+// time is before (or equal to) the entry's created_at.
+func TestEchoes_GitAwareNotFlaggedWhenFileUnmodified(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO projects (id, path) VALUES ('p','/tmp/p')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entryCreated := time.Now().UTC().AddDate(0, 0, -10)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO entries (project_id, topic, kind, title, summary, status, file_path, created_at, updated_at)
+		 VALUES ('p','t','research','stable file entry','summary','current','/some/repo/stable.go',?,?)`,
+		entryCreated.Format(time.RFC3339), entryCreated.Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// File was last modified before the entry was written.
+	fileModified := entryCreated.Add(-24 * time.Hour)
+	t.Cleanup(swapGitFileLastModifiedFn(func(_ context.Context, _ string) time.Time {
+		return fileModified
+	}))
+
+	stale, err := Echoes(ctx, db, "p", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("expected 0 stale entries; got %d: %+v", len(stale), stale)
+	}
+}
+
+// TestEchoes_GitAwareDegradesMissingGit verifies that when the injected fn
+// returns the zero time (simulating missing git, non-repo path, or
+// untracked file), the entry is NOT flagged and no error is returned.
+func TestEchoes_GitAwareDegradesMissingGit(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO projects (id, path) VALUES ('p','/tmp/p')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entryCreated := time.Now().UTC().AddDate(0, 0, -10)
+
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO entries (project_id, topic, kind, title, summary, status, file_path, created_at, updated_at)
+		 VALUES ('p','t','research','non-repo file','summary','current','/not/a/repo/file.go',?,?)`,
+		entryCreated.Format(time.RFC3339), entryCreated.Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate git missing / non-repo / untracked — fn returns zero time.
+	t.Cleanup(swapGitFileLastModifiedFn(func(_ context.Context, _ string) time.Time {
+		return time.Time{}
+	}))
+
+	stale, err := Echoes(ctx, db, "p", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Zero time is treated as "no git info" — entry must NOT be flagged.
+	if len(stale) != 0 {
+		t.Fatalf("expected 0 stale entries when git unavailable; got %d: %+v", len(stale), stale)
+	}
+}
+
+// TestDefaultGitFileLastModified_OutsideRepo exercises the real
+// defaultGitFileLastModified against a path that genuinely lives in a
+// temporary directory that is NOT inside any git repository. It must
+// return the zero time rather than panic or error.
+func TestDefaultGitFileLastModified_OutsideRepo(t *testing.T) {
+	if _, err := execLookPath("git"); err != nil {
+		t.Skip("git not available on PATH")
+	}
+	ctx := context.Background()
+	// t.TempDir() is outside any repo — git rev-parse will fail.
+	path := t.TempDir() + "/nonexistent.go"
+	got := defaultGitFileLastModified(ctx, path)
+	if !got.IsZero() {
+		t.Fatalf("expected zero time for non-repo path; got %v", got)
 	}
 }
