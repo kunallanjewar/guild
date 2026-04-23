@@ -38,8 +38,9 @@ func newTestStore(t testingTB) (*Store, *sql.DB) {
 	return NewStore(db), db
 }
 
-// TestEngine_LoadRules_SeededFromMigration ensures the seed INSERT OR
-// IGNORE in 001_init.up.sql lands the 9 launch-set rules.
+// TestEngine_LoadRules_SeededFromMigration ensures the seeds from
+// 001_init.up.sql and 002_thin_citation_hint.up.sql land the full
+// 10-rule set.
 func TestEngine_LoadRules_SeededFromMigration(t *testing.T) {
 	store, _ := newTestStore(t)
 	eng := NewEngine(store, "s1", EraMCP)
@@ -56,6 +57,7 @@ func TestEngine_LoadRules_SeededFromMigration(t *testing.T) {
 		"inscribe-without-appraise",
 		"clear-without-report-detail",
 		"principle-too-long",
+		"inscribe-without-transfer-reasoning",
 	}
 	for _, id := range wantRules {
 		if _, ok := eng.rules[id]; !ok {

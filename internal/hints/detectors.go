@@ -6,8 +6,10 @@ import (
 )
 
 // This file holds the pure-function triggers + follow-through detectors
-// for the 9 launch-set rules. Each is `func(ctx *Context, ev CallEvent) bool`
-// so rules.go can bind them by value without a lookup table.
+// for every active rule (launch-9 from ENTRY-29 plus QUEST-167's
+// inscribe-without-transfer-reasoning). Each is
+// `func(ctx *Context, ev CallEvent) bool` so rules.go can bind them by
+// value without a lookup table.
 //
 // Conventions:
 //   - Triggers assume ev.Tool already matches Rule.TriggerTool.
@@ -289,6 +291,127 @@ func triggerPrincipleTooLong(_ *Context, ev CallEvent) bool {
 // followPrincipleShortened hits on a later lore_update or lore_reforge
 // targeting a lore entry — the agent has done SOMETHING to tighten up.
 func followPrincipleShortened(_ *Context, ev CallEvent) bool {
+	return ev.Tool == "lore_update" || ev.Tool == "lore_reforge"
+}
+
+// -----------------------------------------------------------------------
+// ℹ️ fyi — inscribe-without-transfer-reasoning
+// -----------------------------------------------------------------------
+//
+// Enforces the LORE-312 reasoning-surface convention: when a lore entry
+// cites an ancestor via `informs`, the summary must name the transfer in
+// 1–3 sentences (why the ancestor applies HERE — delta, inversion,
+// adoption, triviality). Bare "adopts LORE-N, same rationale applies" is
+// rubber-stamp, not cite.
+//
+// Fire condition: informs is non-empty AND summary lacks a transfer
+// marker AND summary lacks the trivial-transfer escape phrasing AND
+// summary is long enough (≥ transferMinSummaryChars) that articulation is
+// reasonable to expect.
+//
+// Tuning (Spike 5 audit 2026-04-22):
+//   - Gold-standards that must NOT fire:
+//       LORE-265 (argv-leakage inversion)  → hit via "because"
+//       LORE-278 (declined adoption delta) → hit via "delta"
+//       LORE-262 (repurposing)             → hit via "repurposed"
+//   - Anti-patterns that MUST fire:
+//       LORE-258 (stdlib flag adoption)    → no markers, fires
+//       LORE-259 (stdlib testing adoption) → no markers, fires
+//       LORE-261 (layout adoption)         → no markers, fires
+//
+// False-positive guards:
+//   - Very short summaries skip the check (can't articulate in 10 words).
+//   - Trivial-transfer escape phrases ("no delta", "same shape", "same
+//     approach") suppress the fire — they themselves name the triviality
+//     per LORE-312's edge case.
+
+// transferMarkersRE matches calibrated-against-Spike 5 phrases that
+// indicate the summary is articulating the transfer between an ancestor
+// and the current entry. Case-insensitive match — the body is lowered
+// before the regex runs.
+//
+// Markers chosen for distinctiveness: each names a named transfer
+// operation (delta, inversion, repurposing, extension, decline, etc.) or
+// an explicit causal clause ("because", "so the conditions"). "Same
+// conditions" is included as a less-strict causal phrasing that still
+// names why the prior applies.
+var transferMarkersRE = regexp.MustCompile(
+	`\bbecause\b|\btransfers?\b|\brepurposed?\b|\binverts?\b|\badapts?\b|` +
+		`\bdelta\b|\bextends?\b|\bdeclines?\b|\breverses?\b|` +
+		`\bso the conditions\b|\bsame conditions\b`,
+)
+
+// trivialTransferEscapeRE matches the LORE-312 edge-case phrasing for
+// legitimate trivial transfers — the brief cite itself names the
+// triviality. If any of these phrases are present, the fire is
+// suppressed: the summary HAS articulated "this is trivial transfer".
+var trivialTransferEscapeRE = regexp.MustCompile(
+	`\bno delta\b|\bsame shape\b|\bsame approach\b`,
+)
+
+// transferMinSummaryChars is the floor below which the detector cannot
+// reasonably expect transfer articulation. Picked at 40 so a 10-word
+// trivial cite like "adopts LORE-185 pattern; same shape, no delta"
+// stays long enough to catch — but a 3-word summary like "see LORE-N"
+// is exempt regardless of tokens.
+const transferMinSummaryChars = 40
+
+// triggerInscribeWithoutTransferReasoning fires on lore_inscribe when
+// the entry cites an ancestor via `informs` AND the summary body lacks
+// both a transfer marker and a trivial-transfer escape phrase. See
+// transferMarkersRE and trivialTransferEscapeRE for the calibrated
+// phrase sets.
+func triggerInscribeWithoutTransferReasoning(_ *Context, ev CallEvent) bool {
+	if !hasInformsArg(ev) {
+		return false
+	}
+	summary := strings.TrimSpace(ev.StringArg("summary"))
+	if len(summary) < transferMinSummaryChars {
+		// Very short summaries can't be expected to articulate transfer
+		// reasoning in any useful way — skip to keep noise low.
+		return false
+	}
+	lowered := strings.ToLower(summary)
+	if transferMarkersRE.MatchString(lowered) {
+		return false
+	}
+	if trivialTransferEscapeRE.MatchString(lowered) {
+		return false
+	}
+	return true
+}
+
+// hasInformsArg reports whether the inscribe event carries at least one
+// ancestor id in `informs`. Handles the two shapes reflectArgs may emit:
+// a []string (the typed path) or a []any (when the MCP JSON unmarshal
+// lands first). Nil / empty slice → false.
+func hasInformsArg(ev CallEvent) bool {
+	v, ok := ev.Args["informs"]
+	if !ok || v == nil {
+		return false
+	}
+	switch s := v.(type) {
+	case []string:
+		for _, id := range s {
+			if strings.TrimSpace(id) != "" {
+				return true
+			}
+		}
+		return false
+	case []any:
+		for _, raw := range s {
+			if str, ok := raw.(string); ok && strings.TrimSpace(str) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// followLoreUpdateOrReforge hits on a later lore_update or lore_reforge
+// — signal that the agent tightened the entry after the nudge.
+func followLoreUpdateOrReforge(_ *Context, ev CallEvent) bool {
 	return ev.Tool == "lore_update" || ev.Tool == "lore_reforge"
 }
 

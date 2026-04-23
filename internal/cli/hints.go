@@ -23,10 +23,11 @@ var hintsCmd = &cobra.Command{
 	Short: "hint engine inspection + administration",
 	Long: `Inspect and administer the SQL-backed hint engine (QUEST-58).
 
-The engine fires advisory lines on top of tool responses per the 9-rule
-launch set calibrated in ENTRY-29. Use these subcommands to see rule
-state, compute per-rule hit rates, prune under-performing rules, or
-manually override enable/disable.`,
+The engine fires advisory lines on top of tool responses. The launch-9
+rules were calibrated in ENTRY-29; later additions (e.g. the thin-citation
+rule from QUEST-167) ship seeded via migrations alongside the rest. Use
+these subcommands to see rule state, compute per-rule hit rates, prune
+under-performing rules, or manually override enable/disable.`,
 	RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 }
 
