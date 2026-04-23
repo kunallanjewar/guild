@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -75,17 +76,49 @@ func echoReason(ctx context.Context, e *Entry, now time.Time, gitAware bool) str
 	return ""
 }
 
-// gitFileLastModified shells out to `git log -1 --format=%aI -- <path>`
+// gitFileLastModifiedFn is the seam for the git-aware staleness check.
+// Tests replace it to exercise the logic without a real git repo or a
+// specific process CWD.
+var gitFileLastModifiedFn = defaultGitFileLastModified
+
+// gitFileLastModified is the internal call site; it delegates to the
+// injectable seam so tests can substitute behaviour.
+func gitFileLastModified(ctx context.Context, path string) time.Time {
+	return gitFileLastModifiedFn(ctx, path)
+}
+
+// defaultGitFileLastModified shells out to `git log -1 --format=%aI -- <path>`
 // and returns the last-modified timestamp parsed to a time.Time.
 // Returns the zero time when git is missing, the file is not tracked,
 // or any error occurs — best-effort.
-func gitFileLastModified(ctx context.Context, path string) time.Time {
+//
+// The command is run with its working directory set to the directory that
+// contains the file, not the process CWD. This ensures the correct
+// repository context is used when guild is launched from outside the
+// target project's directory tree (e.g. MCP sessions, project overrides).
+func defaultGitFileLastModified(ctx context.Context, path string) time.Time {
 	// Bound the command with a 5-second timeout so a stuck git
 	// doesn't hang the lore read.
 	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
+	// Derive the repository root from the file's own directory so the
+	// query is never sensitive to the guild process's ambient CWD.
+	dir := filepath.Dir(path)
 	//nolint:gosec // arguments are hard-coded + file path from DB
-	out, err := exec.CommandContext(cmdCtx, "git", "log", "-1", "--format=%aI", "--", path).Output()
+	repoRootCmd := exec.CommandContext(cmdCtx, "git", "rev-parse", "--show-toplevel")
+	repoRootCmd.Dir = dir
+	repoRootOut, err := repoRootCmd.Output()
+	if err != nil {
+		// git missing, not a repo, or dir doesn't exist — degrade quietly.
+		return time.Time{}
+	}
+	repoRoot := strings.TrimSpace(string(repoRootOut))
+
+	//nolint:gosec // arguments are hard-coded + file path from DB
+	cmd := exec.CommandContext(cmdCtx, "git", "log", "-1", "--format=%aI", "--", path)
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
 	if err != nil {
 		return time.Time{}
 	}
