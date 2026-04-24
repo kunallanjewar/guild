@@ -78,15 +78,7 @@ func Seal(ctx context.Context, db *sql.DB, id int64, projectID string, now time.
 	// coverage-eligible status to archived. Mirrors migration 003's
 	// seeding WHERE status NOT IN ('archived', 'parked').
 	if preStatus != string(StatusArchived) && preStatus != string(StatusParked) {
-		if _, err := conn.ExecContext(ctx, `
-			UPDATE meta
-			   SET value = CAST(
-			     CASE WHEN CAST(value AS INTEGER) > 0
-			          THEN CAST(value AS INTEGER) - 1
-			          ELSE 0
-			     END AS TEXT)
-			 WHERE key = 'vector_coverage_den'
-		`); err != nil {
+		if _, err := conn.ExecContext(ctx, sqlDecrCoverageDen); err != nil {
 			return nil, fmt.Errorf("lore: seal: decrement vector_coverage_den: %w", err)
 		}
 	}

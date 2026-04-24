@@ -273,3 +273,126 @@ func TestBackfill_ProgressThreshold(t *testing.T) {
 }
 
 var _ io.Writer = (*bytes.Buffer)(nil)
+
+// setMetaInt writes key=value into the meta table, overwriting any existing row.
+func setMetaInt(t *testing.T, db *sql.DB, key string, val int64) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO meta (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, strconv.FormatInt(val, 10),
+	); err != nil {
+		t.Fatalf("setMetaInt(%q, %d): %v", key, val, err)
+	}
+}
+
+// TestReconcileDen_FixesDrift verifies that ReconcileDen corrects a stale
+// vector_coverage_den by setting it to the live COUNT(*) of active entries.
+func TestReconcileDen_FixesDrift(t *testing.T) {
+	db := newTestDB(t)
+	seedEntries(t, db, 5)
+
+	// Force den to a wrong value to simulate drift.
+	setMetaInt(t, db, "vector_coverage_den", 2)
+	if got := readMetaInt(t, db, "vector_coverage_den"); got != 2 {
+		t.Fatalf("precondition: den=%d want 2", got)
+	}
+
+	if err := ReconcileDen(context.Background(), db); err != nil {
+		t.Fatalf("ReconcileDen: %v", err)
+	}
+
+	if got := readMetaInt(t, db, "vector_coverage_den"); got != 5 {
+		t.Errorf("den after reconcile: got %d want 5", got)
+	}
+}
+
+// TestBackfill_ReconcilesDenBeforeWriting verifies that Backfill fixes a
+// stale den before writing vectors, so num <= den holds after the run.
+func TestBackfill_ReconcilesDenBeforeWriting(t *testing.T) {
+	db := newTestDB(t)
+	seedEntries(t, db, 5)
+
+	// Force den to 1 (stale low value) to simulate the QUEST-220 drift scenario.
+	setMetaInt(t, db, "vector_coverage_den", 1)
+
+	res, err := Backfill(context.Background(), BackfillOptions{
+		DB:       db,
+		Embedder: NewDeterministicEmbedder(),
+		ModelID:  "test",
+	})
+	if err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if res.Embedded != 5 {
+		t.Errorf("embedded: got %d want 5", res.Embedded)
+	}
+
+	num := readMetaInt(t, db, "vector_coverage_num")
+	den := readMetaInt(t, db, "vector_coverage_den")
+	if num > den {
+		t.Errorf("invariant violated: num=%d > den=%d", num, den)
+	}
+	if den != 5 {
+		t.Errorf("den after backfill: got %d want 5 (reconciled)", den)
+	}
+	if num != 5 {
+		t.Errorf("num after backfill: got %d want 5", num)
+	}
+}
+
+// TestReconcileDen_ExcludesArchivedParked verifies that archived and parked
+// entries are not counted in the denominator.
+func TestReconcileDen_ExcludesArchivedParked(t *testing.T) {
+	db := newTestDB(t)
+	ids := seedEntries(t, db, 4)
+	ctx := context.Background()
+
+	// Archive one, park one.
+	if _, err := db.ExecContext(ctx, `UPDATE entries SET status = 'archived' WHERE id = ?`, ids[0]); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE entries SET status = 'parked' WHERE id = ?`, ids[1]); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+
+	if err := ReconcileDen(ctx, db); err != nil {
+		t.Fatalf("ReconcileDen: %v", err)
+	}
+
+	// Only 2 of the 4 are active.
+	if got := readMetaInt(t, db, "vector_coverage_den"); got != 2 {
+		t.Errorf("den after reconcile: got %d want 2 (active only)", got)
+	}
+}
+
+// TestCoverageInvariant_NumNeverExceedsDen seeds entries, backfills, and
+// asserts that num <= den at every step (regression for QUEST-220).
+func TestCoverageInvariant_NumNeverExceedsDen(t *testing.T) {
+	db := newTestDB(t)
+	seedEntries(t, db, 7)
+
+	res, err := Backfill(context.Background(), BackfillOptions{
+		DB:       db,
+		Embedder: NewDeterministicEmbedder(),
+		ModelID:  "t",
+	})
+	if err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if res.Embedded != 7 {
+		t.Errorf("embedded: got %d want 7", res.Embedded)
+	}
+
+	num := readMetaInt(t, db, "vector_coverage_num")
+	den := readMetaInt(t, db, "vector_coverage_den")
+	if num > den {
+		t.Errorf("QUEST-220 regression: num=%d > den=%d (coverage > 100%%)", num, den)
+	}
+	if den != 7 {
+		t.Errorf("den: got %d want 7", den)
+	}
+	if num != 7 {
+		t.Errorf("num: got %d want 7", num)
+	}
+}

@@ -18,6 +18,7 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild lore archive`](#guild-lore-archive) — write snapshot.json for git-trackable project checkpoint (alias: export)
 - [`guild lore catalog`](#guild-lore-catalog) — bulk-import .md files as lore entries
 - [`guild lore commune`](#guild-lore-commune) — health report for oath bloat and duplicate lore
+- [`guild lore coverage-reconcile`](#guild-lore-coverage-reconcile) — reset vector_coverage_den to the live active-entry count
 - [`guild lore dossier`](#guild-lore-dossier) — emit ~2k-token project context bundle for subagents
 - [`guild lore echoes`](#guild-lore-echoes) — surface stale entries for review
 - [`guild lore embed-rebuild`](#guild-lore-embed-rebuild) — reset and rebuild the embedding vector index for the active project
@@ -260,6 +261,27 @@ Health report for oath bloat and duplicate lore. fix=true auto-remediates severe
 | --- | --- | --- | --- |
 | `--all-projects` | bool | `false` | check across every project |
 | `--fix` | bool | `false` | apply safe auto-remediation |
+| `--json` | bool | `false` | emit structured JSON result instead of formatted text |
+| `--project`, `-p` | string | `—` | project override |
+
+## `guild lore coverage-reconcile`
+
+reset vector_coverage_den to the live active-entry count
+
+**Usage**
+
+```
+guild lore coverage-reconcile [flags]
+```
+
+**Aliases:** fix-coverage
+
+Reset meta.vector_coverage_den to the live COUNT(*) WHERE status NOT IN ('archived','parked') and report before/after values. Corrects num > den drift that produces coverage > 100%. Backfill also runs this automatically, so this command is a manual escape hatch.
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
 | `--json` | bool | `false` | emit structured JSON result instead of formatted text |
 | `--project`, `-p` | string | `—` | project override |
 

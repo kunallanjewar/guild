@@ -65,6 +65,8 @@ var expectedTools = []struct {
 	// Embedder health tools (Phase 1.6 ADR-003, QUEST-211).
 	{"lore_health"},
 	{"lore_embed_rebuild"},
+	// Coverage denominator reconcile (QUEST-220 / LORE-373).
+	{"lore_coverage_reconcile"},
 }
 
 // isolateProject sets up a fresh $HOME, registers an active project,
@@ -789,6 +791,8 @@ func smokeArgsFor(name string) map[string]any {
 	case "lore_health":
 		return base
 	case "lore_embed_rebuild":
+		return base
+	case "lore_coverage_reconcile":
 		return base
 	case "lore_ripples":
 		return map[string]any{"entry_id": "999999", "project": "testproj"}

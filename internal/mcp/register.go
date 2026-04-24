@@ -119,6 +119,7 @@ func registerAlwaysOn(s *sdkmcp.Server) {
 	// --- lore (embedder health, Phase 1.6 ADR-003) ---
 	lore.EmbedderHealthCommand.BindMCP(s, loreDeps)
 	lore.EmbedRebuildCommand.BindMCP(s, loreDeps)
+	lore.CoverageReconcileCommand.BindMCP(s, loreDeps)
 	// --- quest (common flow) ---
 	mcpDeps := buildMCPCommandDeps()
 	quest.PostCommand.BindMCP(s, mcpDeps)
