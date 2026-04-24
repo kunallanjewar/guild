@@ -42,7 +42,7 @@ var EmbedderHealthCommand = &command.Command[EmbedderHealthInput, EmbedderHealth
 		defer func() { _ = db.Close() }()
 		// ResolveProj enforces the bootstrap contract (active project must
 		// be set via guild_session_start). The project ID is not used by
-		// ReadHealthReport — embedder meta is global — but skipping this
+		// ReadHealthReport (embedder meta is global) but skipping this
 		// call would let the tool operate without a bootstrapped project,
 		// violating the TestTools_BootstrapRequired contract.
 		if _, err := d.ResolveProj(ctx, in.Project); err != nil {
@@ -78,7 +78,7 @@ func formatEmbedderHealth(s lineSink, o EmbedderHealthCmdOutput) string {
 	stateStr := string(r.State)
 	sessionLine := r.SessionLine()
 	if sessionLine != "" {
-		stateStr += fmt.Sprintf(" — %s", sessionLine)
+		stateStr += fmt.Sprintf(": %s", sessionLine)
 	}
 	b.WriteString(fmt.Sprintf("  state:           %s\n", stateStr))
 

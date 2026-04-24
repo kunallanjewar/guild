@@ -113,7 +113,7 @@ func TestSessionLine_DisabledAppearsInBody(t *testing.T) {
 	// Since we can't use :memory: via path, verify SessionLine directly.
 	//
 	// The real integration test is that renderBounties calls embed.ReadHealthReport
-	// and appends the line — tested in the smoke test below.
+	// and appends the line (tested in the smoke test below).
 	_ = db
 	_ = ctx
 
@@ -123,11 +123,11 @@ func TestSessionLine_DisabledAppearsInBody(t *testing.T) {
 }
 
 // TestFormatBounties_UnchangedSignature asserts that formatBounties still
-// accepts (res, briefOnly bool) — our changes to renderBounties must not
+// accepts (res, briefOnly bool). Our changes to renderBounties must not
 // change the existing function signature or break existing callers.
 func TestFormatBounties_UnchangedSignature(t *testing.T) {
 	// This test proves that formatBounties can still be called with just
-	// (BountiesResult, bool) — no regression on existing callers.
+	// (BountiesResult, bool) without regression on existing callers.
 	// The embedder line is injected AFTER formatBounties returns, in
 	// renderBounties. So the signature is preserved.
 

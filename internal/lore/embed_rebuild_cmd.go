@@ -105,7 +105,7 @@ var EmbedRebuildCommand = &command.Command[EmbedRebuildInput, EmbedRebuildOutput
 func formatEmbedRebuild(s lineSink, o EmbedRebuildOutput) string {
 	if o.Disabled {
 		return strings.TrimRight(
-			s.Line("🔮", "[embed-rebuild]", fmt.Sprintf("skipped — %s", o.Reason)),
+			s.Line("🔮", "[embed-rebuild]", fmt.Sprintf("skipped: %s", o.Reason)),
 			"\n",
 		)
 	}

@@ -78,8 +78,10 @@ func seedMeta(t *testing.T, db *sql.DB, state EmbedderState, coverageNum, covera
 	}
 }
 
-// seedEntries inserts n entries with the given vector_state.
-func seedEntries(t *testing.T, db *sql.DB, n int, state string) {
+// seedEntriesWithState inserts n entries with the given vector_state.
+// Distinct from backfill_test.go's seedEntries helper (same package),
+// which pre-existed and returns IDs without a state parameter.
+func seedEntriesWithState(t *testing.T, db *sql.DB, n int, state string) {
 	t.Helper()
 	ctx := context.Background()
 	for i := range n {
@@ -162,8 +164,8 @@ func TestReadHealthReport_PendingAndStaleCount(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	seedMeta(t, db, EmbedderStateEnabled, 2, 7, 0)
-	seedEntries(t, db, 3, "pending")
-	seedEntries(t, db, 2, "stale")
+	seedEntriesWithState(t, db, 3, "pending")
+	seedEntriesWithState(t, db, 2, "stale")
 
 	r, err := ReadHealthReport(ctx, db)
 	if err != nil {
@@ -273,10 +275,10 @@ func TestSessionLine_Variants(t *testing.T) {
 				)
 			}
 			if tc.pending > 0 {
-				seedEntries(t, db, tc.pending, "pending")
+				seedEntriesWithState(t, db, tc.pending, "pending")
 			}
 			if tc.stale > 0 {
-				seedEntries(t, db, tc.stale, "stale")
+				seedEntriesWithState(t, db, tc.stale, "stale")
 			}
 
 			r, err := ReadHealthReport(ctx, db)
@@ -324,7 +326,7 @@ func TestRebuildVectors_ZerosThenRestores(t *testing.T) {
 
 	// Seed 5 active entries.
 	seedMeta(t, db, EmbedderStateEnabled, 5, 5, 0)
-	seedEntries(t, db, 5, "indexed")
+	seedEntriesWithState(t, db, 5, "indexed")
 
 	// Rebuild with a DeterministicEmbedder (not NullEmbedder so encodes succeed).
 	e := NewDeterministicEmbedder()
@@ -360,7 +362,7 @@ func TestRebuildVectors_NullEmbedderZerosCoverage(t *testing.T) {
 
 	// Start with fully covered corpus.
 	seedMeta(t, db, EmbedderStateEnabled, int64(numEntries), int64(numEntries), 0)
-	seedEntries(t, db, numEntries, "indexed")
+	seedEntriesWithState(t, db, numEntries, "indexed")
 
 	// RebuildVectors with NullEmbedder: encodes will all fail so coverage_num ends at 0.
 	e := NewNullEmbedder()

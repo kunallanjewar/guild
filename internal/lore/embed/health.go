@@ -28,7 +28,7 @@ const (
 // Healthy state: empty string (no noise). Non-healthy states emit a single line.
 type SessionHealthLine struct {
 	// Line is the compact text to append in the session-start snapshot.
-	// Empty string means "healthy" — emit nothing.
+	// Empty string means "healthy" (emit nothing).
 	Line string
 }
 
