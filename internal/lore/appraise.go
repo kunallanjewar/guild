@@ -59,12 +59,9 @@ type AppraiseParams struct {
 	// "Partial coverage and deterministic fallback".
 	Embed *EmbedDeps
 
-	// ProjectIDs, when AllProjects=true, optionally narrows the
-	// cross-project fan-out to a specific list of project ids. An
-	// empty slice means "every project in the entries table" (the
-	// historical default the CLI/MCP has always emitted). Exposed
-	// for the cross-project RRF path so the caller can reuse
-	// per-project indexes it already warmed.
+	// ProjectIDs is reserved for future use. The cross-project RRF path
+	// now runs a single global BM25+vector query rather than a per-project
+	// fan-out, so this field is no longer read. Kept for API compatibility.
 	ProjectIDs []string
 }
 
