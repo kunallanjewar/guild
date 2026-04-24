@@ -187,6 +187,21 @@ func appraiseCrossProject(
 		logger = slog.Default()
 	}
 
+	// Keep the index fresh even on the cross-project path. A failure
+	// here is not fatal: we log and fall back to the BM25-only path,
+	// matching the single-project RRF arm's policy. QUEST-219:
+	// without this, cross-process vector writes made by `guild init`
+	// or an embed-rebuild from another MCP server are invisible to
+	// any all_projects=true appraise until the server restarts.
+	if params.Embed.Index != nil {
+		if _, err := params.Embed.Index.CheckAndReload(ctx, db); err != nil {
+			logger.Warn("lore: appraise (all_projects): index CheckAndReload failed; falling back",
+				"err", err,
+			)
+			return nil, false, nil
+		}
+	}
+
 	// Encode once. The per-project Index.TopK calls share the same
 	// int8 qvec.
 	fvec, err := params.Embed.Embedder.Embed(ctx, params.Query)

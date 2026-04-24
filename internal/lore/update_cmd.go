@@ -53,7 +53,7 @@ var UpdateCommand = &command.Command[UpdateInput, UpdateCmdOutput]{
 		if err != nil {
 			return UpdateCmdOutput{}, err
 		}
-		p := UpdateParams{ProjectID: pid, Embed: embedFromDeps(d)}
+		p := UpdateParams{ProjectID: pid, Embed: embedFromDeps(ctx, d)}
 		if in.Title != "" {
 			v := in.Title
 			p.Title = &v

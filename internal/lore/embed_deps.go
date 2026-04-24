@@ -9,18 +9,53 @@ import (
 	"github.com/mathomhaus/guild/internal/lore/embed"
 )
 
+// embedResolver is the lazy-reconstruct interface the MCP adapter
+// implements on its embedProvider type. The lore package declares the
+// interface locally (no reverse import) and type-switches d.Embed
+// against it. QUEST-219 introduced this path so the long-lived MCP
+// server can re-read meta.embedder_state on every lore tool entry and
+// pick up a mid-session flip (the most common trigger: the user runs
+// `guild init` in another process while Claude is attached). See
+// LORE-371 for the E2E observation that motivated the contract and
+// LORE-372 for the decision.
+//
+// CLI remains fresh-per-invocation (see internal/cli/lore_read.go),
+// so CLI stashes *EmbedDeps directly and never touches this path.
+type embedResolver interface {
+	ResolveEmbedDeps(ctx context.Context) *EmbedDeps
+}
+
 // embedFromDeps extracts the *EmbedDeps the adapter layer (MCP or CLI)
 // stashed into command.Deps.Embed. command.Deps carries Embed as `any`
 // to keep the command package free of a lore dependency; this helper
 // centralizes the type assertion so every lore handler pulls it the
 // same way and the failure mode (nil on mismatch) is uniform. A nil
 // return is the documented Phase-0 fallback path.
-func embedFromDeps(d command.Deps) *EmbedDeps {
+//
+// Two shapes are supported:
+//
+//   - *EmbedDeps: a pre-constructed value, the CLI-surface shape. The
+//     helper returns it unchanged.
+//   - embedResolver: a provider that knows how to lazy-reconstruct,
+//     the MCP-surface shape. The helper calls ResolveEmbedDeps(ctx)
+//     and returns whatever the adapter decides is current. This is
+//     the QUEST-219 path; it re-reads meta.embedder_state and
+//     returns a freshly-wired *EmbedDeps after a mid-session flip.
+//
+// Unknown types produce a nil result so an accidental bad assignment
+// in the adapter falls back to BM25 instead of panicking.
+func embedFromDeps(ctx context.Context, d command.Deps) *EmbedDeps {
 	if d.Embed == nil {
 		return nil
 	}
-	e, _ := d.Embed.(*EmbedDeps)
-	return e
+	switch v := d.Embed.(type) {
+	case *EmbedDeps:
+		return v
+	case embedResolver:
+		return v.ResolveEmbedDeps(ctx)
+	default:
+		return nil
+	}
 }
 
 // EmbedDeps bundles the optional embedding-pipeline dependencies that

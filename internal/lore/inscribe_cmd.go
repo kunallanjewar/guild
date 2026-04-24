@@ -81,7 +81,7 @@ var InscribeCommand = &command.Command[InscribeInput, InscribeCmdOutput]{
 			NeedsReview:   in.NeedsReview,
 			NoWarn:        in.NoWarn,
 			StrictProject: in.StrictProject,
-			Embed:         embedFromDeps(d),
+			Embed:         embedFromDeps(ctx, d),
 		})
 		if err != nil {
 			return InscribeCmdOutput{}, err

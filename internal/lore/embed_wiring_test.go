@@ -116,7 +116,7 @@ func TestWireEmbedDeps_FallbackPaths(t *testing.T) {
 			// Nil-safety: embedFromDeps must tolerate both paths without
 			// a type assertion panic. Hand it through the commandDeps-
 			// style opaque field to exercise the full round trip.
-			roundTrip := embedFromDeps(stubCommandDeps(deps))
+			roundTrip := embedFromDeps(ctx, stubCommandDeps(deps))
 			if tc.wantWired && roundTrip == nil {
 				t.Errorf("embedFromDeps round-trip dropped a non-nil EmbedDeps")
 			}
