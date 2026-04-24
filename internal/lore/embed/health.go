@@ -101,6 +101,7 @@ func ReadHealthReport(ctx context.Context, db *sql.DB) (*HealthReport, error) {
 		    'embedder_runtime_version',
 		    'embedder_dim',
 		    'embedder_state',
+		    'embedder_state_reason',
 		    'vector_epoch',
 		    'vector_coverage_num',
 		    'vector_coverage_den',
@@ -136,6 +137,7 @@ func ReadHealthReport(ctx context.Context, db *sql.DB) (*HealthReport, error) {
 	if r.State == "" {
 		r.State = EmbedderStateDisabled
 	}
+	r.DisabledReason = meta["embedder_state_reason"]
 
 	if v, ok := meta["embedder_dim"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -242,21 +244,50 @@ func (r *HealthReport) SessionLine() string {
 	}
 }
 
-// disabledReason returns the human-readable reason the embedder is disabled.
-// It checks known meta keys to distinguish Windows, dylib probe failures, and
-// binary-outdated states. Returns "" when no specific reason is stored.
+// disabledReason returns the parenthesised tag for the session-start line.
+// It reads the stored meta.embedder_state_reason first; if absent it falls
+// back to inspecting embed_last_error for legacy DBs written before
+// embedder_state_reason was added.
+//
+// Known reason values from PrepareAndProbe / WriteMeta:
+//
+//	unsupported_platform, probe_mismatch, extract_failed, no_assets,
+//	embedder_init_failed, probe_error, binary_outdated
+//
+// Unknown future values are rendered verbatim for forward compatibility.
+// Returns "" only when no reason info is available at all.
 func disabledReason(r *HealthReport) string {
-	if r.LastEncodeError != "" {
-		if strings.Contains(strings.ToLower(r.LastEncodeError), "binary_outdated") {
-			return "binary outdated"
+	if r.DisabledReason != "" {
+		// Map the stored machine tag to the display form prescribed by ADR-003.
+		switch r.DisabledReason {
+		case "unsupported_platform":
+			return "unsupported_platform"
+		case "probe_mismatch":
+			return "probe_mismatch"
+		case "extract_failed":
+			return "extract_failed"
+		case "no_assets":
+			return "no_assets"
+		case "embedder_init_failed":
+			return "init_failed"
+		case "probe_error":
+			return "probe_error"
+		case "binary_outdated":
+			return "binary_outdated"
+		case "ok":
+			// Should not occur when state=disabled, but guard cleanly.
+			return ""
+		default:
+			// Forward-compat: unknown future reason rendered verbatim.
+			return r.DisabledReason
 		}
+	}
+	// Legacy fallback for DBs that predate embedder_state_reason: inspect
+	// embed_last_error as a heuristic only.
+	if r.LastEncodeError != "" {
 		return fmt.Sprintf("dylib probe failed: %s", r.LastEncodeError)
 	}
-	// No stored error but disabled: most likely Windows or explicit opt-out.
-	if r.DisabledReason != "" {
-		return r.DisabledReason
-	}
-	return "Windows"
+	return ""
 }
 
 // backfillETA returns a rough ETA string for the remaining pending entries.
