@@ -217,11 +217,15 @@ assets-runtime: ## Download libonnxruntime per-platform from the ORT GitHub rele
 	    if [ -f $$target ]; then echo "  keep $$target"; continue; fi; \
 	    url="https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-$$ortname-$(ORT_VERSION).tgz"; \
 	    tar=$$tmp/$$triple.tgz; \
+	    extract=$$tmp/$$triple; \
+	    mkdir -p $$extract; \
 	    echo "  fetch $$url"; \
 	    curl -fsSL -o $$tar $$url; \
-	    tar -xzf $$tar -C $$tmp --strip-components=1 "onnxruntime-$$ortname-$(ORT_VERSION)/lib/$$libname"; \
-	    cp $$tmp/lib/$$libname $$target; \
-	    rm -f $$tar; \
+	    tar -xzf $$tar -C $$extract; \
+	    src=$$(find $$extract -type f -name "$$libname" | head -n1); \
+	    if [ -z "$$src" ]; then echo "✗ $$libname not found in $$url"; exit 1; fi; \
+	    cp "$$src" "$$target"; \
+	    rm -f $$tar; rm -rf $$extract; \
 	done; \
 	rm -rf $$tmp
 	@echo "✓ libonnxruntime staged"
@@ -235,6 +239,11 @@ assets-clean: ## Remove every staged asset (keeps directories + README + .gitign
 build-embed: assets ## Build the guild binary with embedded runtime assets (-tags=withembed)
 	$(GO) build $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/guild
 	@echo "✓ built $(BIN) with -tags=withembed"
+
+.PHONY: install-embed
+install-embed: assets ## Install guild with embedded runtime assets to $$GOPATH/bin (-tags=withembed)
+	$(GO) install $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" ./cmd/guild
+	@echo "✓ installed guild with -tags=withembed ($(VERSION) $(COMMIT))"
 
 # ----------------------------------------------------------------------
 # Release

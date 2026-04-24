@@ -5,8 +5,23 @@ import (
 	"database/sql"
 	"log/slog"
 
+	"github.com/mathomhaus/guild/internal/command"
 	"github.com/mathomhaus/guild/internal/lore/embed"
 )
+
+// embedFromDeps extracts the *EmbedDeps the adapter layer (MCP or CLI)
+// stashed into command.Deps.Embed. command.Deps carries Embed as `any`
+// to keep the command package free of a lore dependency; this helper
+// centralizes the type assertion so every lore handler pulls it the
+// same way and the failure mode (nil on mismatch) is uniform. A nil
+// return is the documented Phase-0 fallback path.
+func embedFromDeps(d command.Deps) *EmbedDeps {
+	if d.Embed == nil {
+		return nil
+	}
+	e, _ := d.Embed.(*EmbedDeps)
+	return e
+}
 
 // EmbedDeps bundles the optional embedding-pipeline dependencies that
 // the lore write and read paths accept. All fields are optional; a
