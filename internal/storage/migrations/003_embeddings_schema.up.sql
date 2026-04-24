@@ -1,4 +1,4 @@
--- 003_embeddings_schema.up.sql — Phase 1.2 of ADR-003: lore_vectors table,
+-- 003_embeddings_schema.up.sql: Phase 1.2 of ADR-003. lore_vectors table,
 -- vector_state column on entries, meta key-value store, and seeded embedder
 -- rows.
 --
