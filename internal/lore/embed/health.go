@@ -84,33 +84,53 @@ const repeatedFailureThreshold = 5
 // the corpus is still "backfilling" from the session-start perspective.
 const backfillCoverageThreshold = 0.90
 
-// ReadHealthReport queries the lore.db meta table and entries/lore_vectors
-// counts to produce a HealthReport. The caller is responsible for opening
-// and closing the DB connection.
-func ReadHealthReport(ctx context.Context, db *sql.DB) (*HealthReport, error) {
+// ReadHealthReport queries the corpus's meta rows plus its entity and
+// vector tables to produce a HealthReport. The caller is responsible
+// for opening and closing the DB connection.
+//
+// corpus may be nil, which selects LoreCorpus{} for backward compat
+// with callers that predate the port. Per-corpus health is
+// independent: two corpora sharing a DB produce two independent
+// reports because their MetaKey resolution does not alias.
+func ReadHealthReport(ctx context.Context, db *sql.DB, corpus VectorCorpus) (*HealthReport, error) {
 	if db == nil {
 		return nil, fmt.Errorf("embed: health: nil db")
 	}
+	if corpus == nil {
+		corpus = LoreCorpus{}
+	}
 
-	// Read all relevant meta keys in one pass.
-	rows, err := db.QueryContext(ctx,
-		`SELECT key, value FROM meta
-		  WHERE key IN (
-		    'embedder_model_id',
-		    'embedder_tokenizer_hash',
-		    'embedder_runtime_version',
-		    'embedder_dim',
-		    'embedder_state',
-		    'embedder_state_reason',
-		    'vector_epoch',
-		    'vector_coverage_num',
-		    'vector_coverage_den',
-		    'embed_error_count',
-		    'embed_last_error',
-		    'embed_last_error_at',
-		    'embed_last_ok_at'
-		  )`,
-	)
+	// Resolve every meta key once so the query IN list and the
+	// later map lookups agree on the same strings. Order is stable
+	// per MetaField enum so prefixed corpora line up with lore's
+	// keyset shape.
+	fields := []MetaField{
+		FieldEmbedderModelID,
+		FieldEmbedderTokenizerHash,
+		FieldEmbedderRuntimeVersion,
+		FieldEmbedderDim,
+		FieldEmbedderState,
+		FieldEmbedderStateReason,
+		FieldVectorEpoch,
+		FieldVectorCoverageNum,
+		FieldVectorCoverageDen,
+		FieldEmbedErrorCount,
+		FieldEmbedLastError,
+		FieldEmbedLastErrorAt,
+		FieldEmbedLastOKAt,
+	}
+	keys := make([]string, 0, len(fields))
+	for _, f := range fields {
+		keys = append(keys, corpus.MetaKey(f))
+	}
+	placeholders := make([]string, len(keys))
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		placeholders[i] = "?"
+		args[i] = k
+	}
+	metaQuery := fmt.Sprintf(`SELECT key, value FROM meta WHERE key IN (%s)`, strings.Join(placeholders, ",")) //nolint:gosec // G201: only substitution is "?,?,?..." placeholders of fixed count; keys flow as parameters.
+	rows, err := db.QueryContext(ctx, metaQuery, args...)                                                      //nolint:sqlcheck // IN list expanded from compile-time corpus accessors.
 	if err != nil {
 		return nil, fmt.Errorf("embed: health: query meta: %w", err)
 	}
@@ -130,16 +150,19 @@ func ReadHealthReport(ctx context.Context, db *sql.DB) (*HealthReport, error) {
 
 	r := &HealthReport{}
 
-	r.ModelID = meta["embedder_model_id"]
-	r.TokenizerHash = meta["embedder_tokenizer_hash"]
-	r.RuntimeVersion = meta["embedder_runtime_version"]
-	r.State = EmbedderState(meta["embedder_state"])
+	// Look up each field by its corpus-resolved key.
+	get := func(f MetaField) string { return meta[corpus.MetaKey(f)] }
+
+	r.ModelID = get(FieldEmbedderModelID)
+	r.TokenizerHash = get(FieldEmbedderTokenizerHash)
+	r.RuntimeVersion = get(FieldEmbedderRuntimeVersion)
+	r.State = EmbedderState(get(FieldEmbedderState))
 	if r.State == "" {
 		r.State = EmbedderStateDisabled
 	}
-	r.DisabledReason = meta["embedder_state_reason"]
+	r.DisabledReason = get(FieldEmbedderStateReason)
 
-	if v, ok := meta["embedder_dim"]; ok {
+	if v := get(FieldEmbedderDim); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			r.Dim = n
 		}
@@ -148,43 +171,46 @@ func ReadHealthReport(ctx context.Context, db *sql.DB) (*HealthReport, error) {
 		r.Dim = Dim
 	}
 
-	r.VectorEpoch = parseInt64(meta["vector_epoch"])
-	r.CoverageNum = parseInt64(meta["vector_coverage_num"])
-	r.CoverageDen = parseInt64(meta["vector_coverage_den"])
+	r.VectorEpoch = parseInt64(get(FieldVectorEpoch))
+	r.CoverageNum = parseInt64(get(FieldVectorCoverageNum))
+	r.CoverageDen = parseInt64(get(FieldVectorCoverageDen))
 
 	if r.CoverageDen > 0 {
 		r.CoveragePct = float64(r.CoverageNum) / float64(r.CoverageDen) * 100.0
 	}
 
-	r.EmbedErrorCount = parseInt64(meta["embed_error_count"])
-	r.LastEncodeError = meta["embed_last_error"]
+	r.EmbedErrorCount = parseInt64(get(FieldEmbedErrorCount))
+	r.LastEncodeError = get(FieldEmbedLastError)
 
-	if ts := meta["embed_last_error_at"]; ts != "" {
+	if ts := get(FieldEmbedLastErrorAt); ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			r.LastEncodeErrAt = &t
 		}
 	}
-	if ts := meta["embed_last_ok_at"]; ts != "" {
+	if ts := get(FieldEmbedLastOKAt); ts != "" {
 		if t, err := time.Parse(time.RFC3339, ts); err == nil {
 			r.LastEncodeOKAt = &t
 		}
 	}
 
-	// Count pending and stale entries (active entries only).
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM entries
-		  WHERE vector_state = 'pending'
-		    AND status NOT IN ('archived', 'parked')`,
-	).Scan(&r.PendingCount); err != nil {
-		slog.WarnContext(ctx, "embed: health: pending count query failed", "err", err)
-	}
+	// Count pending and stale entities. Corpora that don't track
+	// state (VectorStateColumn() == "") skip these queries: their
+	// health report reports zero for both counts, which is the
+	// correct answer in a no-state-tracking model.
+	if stateCol := corpus.VectorStateColumn(); stateCol != "" {
+		activePred := corpus.ActivePredicate()
+		if activePred == "" {
+			activePred = "1=1"
+		}
+		pendingQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s = 'pending' AND %s`, corpus.EntityTable(), stateCol, activePred) //nolint:gosec // G201: all substitutions are compile-time corpus accessors, not user input.
+		if err := db.QueryRowContext(ctx, pendingQuery).Scan(&r.PendingCount); err != nil {                                            //nolint:sqlcheck // all parts are compile-time corpus accessors.
+			slog.WarnContext(ctx, "embed: health: pending count query failed", "err", err)
+		}
 
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM entries
-		  WHERE vector_state = 'stale'
-		    AND status NOT IN ('archived', 'parked')`,
-	).Scan(&r.StaleCount); err != nil {
-		slog.WarnContext(ctx, "embed: health: stale count query failed", "err", err)
+		staleQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s = 'stale' AND %s`, corpus.EntityTable(), stateCol, activePred) //nolint:gosec // G201: all substitutions are compile-time corpus accessors, not user input.
+		if err := db.QueryRowContext(ctx, staleQuery).Scan(&r.StaleCount); err != nil {                                            //nolint:sqlcheck // all parts are compile-time corpus accessors.
+			slog.WarnContext(ctx, "embed: health: stale count query failed", "err", err)
+		}
 	}
 
 	r.HealthClass = classifyHealth(r)

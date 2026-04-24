@@ -49,7 +49,7 @@ var EmbedderHealthCommand = &command.Command[EmbedderHealthInput, EmbedderHealth
 			return EmbedderHealthCmdOutput{}, err
 		}
 
-		report, err := embed.ReadHealthReport(ctx, db)
+		report, err := embed.ReadHealthReport(ctx, db, embed.LoreCorpus{})
 		if err != nil {
 			return EmbedderHealthCmdOutput{}, fmt.Errorf("lore: health: %w", err)
 		}

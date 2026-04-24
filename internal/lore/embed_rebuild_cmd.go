@@ -53,7 +53,7 @@ var EmbedRebuildCommand = &command.Command[EmbedRebuildInput, EmbedRebuildOutput
 		defer func() { _ = db.Close() }()
 
 		// Read the embedder state from meta before committing to a full rebuild.
-		report, err := embed.ReadHealthReport(ctx, db)
+		report, err := embed.ReadHealthReport(ctx, db, embed.LoreCorpus{})
 		if err != nil {
 			return EmbedRebuildOutput{}, fmt.Errorf("lore: embed-rebuild: read health: %w", err)
 		}
@@ -82,7 +82,7 @@ var EmbedRebuildCommand = &command.Command[EmbedRebuildInput, EmbedRebuildOutput
 		}
 
 		// Re-read coverage_num after rebuild to report final counts.
-		after, err := embed.ReadHealthReport(ctx, db)
+		after, err := embed.ReadHealthReport(ctx, db, embed.LoreCorpus{})
 		if err != nil {
 			return EmbedRebuildOutput{ProjectID: pid}, nil
 		}

@@ -104,7 +104,7 @@ func TestReadHealthReport_Healthy(t *testing.T) {
 	ctx := context.Background()
 	seedMeta(t, db, EmbedderStateEnabled, 10, 10, 0)
 
-	r, err := ReadHealthReport(ctx, db)
+	r, err := ReadHealthReport(ctx, db, LoreCorpus{})
 	if err != nil {
 		t.Fatalf("ReadHealthReport: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestReadHealthReport_ReadsMetaFaithfully(t *testing.T) {
 		t.Fatalf("seed embed_last_error: %v", err)
 	}
 
-	r, err := ReadHealthReport(ctx, db)
+	r, err := ReadHealthReport(ctx, db, LoreCorpus{})
 	if err != nil {
 		t.Fatalf("ReadHealthReport: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestReadHealthReport_PendingAndStaleCount(t *testing.T) {
 	seedEntriesWithState(t, db, 3, "pending")
 	seedEntriesWithState(t, db, 2, "stale")
 
-	r, err := ReadHealthReport(ctx, db)
+	r, err := ReadHealthReport(ctx, db, LoreCorpus{})
 	if err != nil {
 		t.Fatalf("ReadHealthReport: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSessionLine_HealthyEmitsNothing(t *testing.T) {
 	// Fully covered corpus, no errors.
 	seedMeta(t, db, EmbedderStateEnabled, 100, 100, 0)
 
-	r, err := ReadHealthReport(ctx, db)
+	r, err := ReadHealthReport(ctx, db, LoreCorpus{})
 	if err != nil {
 		t.Fatalf("ReadHealthReport: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestSessionLine_Variants(t *testing.T) {
 				seedEntriesWithState(t, db, tc.stale, "stale")
 			}
 
-			r, err := ReadHealthReport(ctx, db)
+			r, err := ReadHealthReport(ctx, db, LoreCorpus{})
 			if err != nil {
 				t.Fatalf("ReadHealthReport: %v", err)
 			}
