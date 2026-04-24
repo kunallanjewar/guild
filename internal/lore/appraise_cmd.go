@@ -75,6 +75,7 @@ var AppraiseCommand = &command.Command[AppraiseInput, AppraiseCmdOutput]{
 			Since:       since,
 			Scoring:     DefaultScoring(),
 			Now:         now,
+			Embed:       embedFromDeps(d),
 		})
 		if err != nil {
 			return AppraiseCmdOutput{}, err
