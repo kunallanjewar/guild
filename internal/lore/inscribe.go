@@ -223,6 +223,14 @@ func Inscribe(ctx context.Context, db *sql.DB, p *InscribeParams) (*InscribeResu
 		return nil, fmt.Errorf("lore: inscribe: last insert id: %w", err)
 	}
 
+	// Every newly inscribed entry is active (seed or current; never archived
+	// or parked at insert time), so always increment the coverage denominator.
+	// This keeps vector_coverage_den in sync with the live active-entry count
+	// and prevents num > den drift (QUEST-220 / LORE-373).
+	if _, err := db.ExecContext(ctx, sqlBumpCoverageDen); err != nil {
+		return nil, fmt.Errorf("lore: inscribe: bump vector_coverage_den: %w", err)
+	}
+
 	entry := &Entry{
 		ID:          id,
 		ProjectID:   p.ProjectID,

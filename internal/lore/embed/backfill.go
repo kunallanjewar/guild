@@ -37,6 +37,34 @@ import (
 	"time"
 )
 
+// activeEntriesPredicate is the embed-package copy of the canonical predicate
+// for entries eligible for vector embedding. The lore package maintains an
+// identical copy in types.go; they cannot share it because internal/lore/embed
+// must not import internal/lore (hexagonal boundary).
+//
+// Value must stay in sync with lore.activeEntriesPredicate and migration 003.
+const activeEntriesPredicate = "status NOT IN ('archived', 'parked')"
+
+// sqlCountActive is the COUNT query used by ReconcileDen. Pre-built as a
+// constant so sqlcheck does not flag string concatenation at the call site.
+const sqlCountActive = "SELECT COUNT(*) FROM entries WHERE " + activeEntriesPredicate
+
+// sqlScanPending is the full LEFT JOIN query that finds entries with no
+// vector row whose status makes them embedding-eligible. Pre-built so
+// sqlcheck sees a single constant identifier at the call site.
+const sqlScanPending = `
+	SELECT e.id, e.summary
+	FROM   entries e
+	LEFT   JOIN lore_vectors v ON v.entry_id = e.id
+	WHERE  v.entry_id IS NULL
+	  AND  e.` + activeEntriesPredicate + `
+	ORDER  BY e.id ASC
+`
+
+// sqlInvalidateFlipPending is the UPDATE that flips every active entry back
+// to vector_state='pending' during Invalidate.
+const sqlInvalidateFlipPending = "UPDATE entries SET vector_state = 'pending' WHERE " + activeEntriesPredicate
+
 // PendingEntry is one row that needs an embedding. Backfill iterates
 // these and encodes Summary (the ADR-003 canonical embedding input).
 type PendingEntry struct {
@@ -91,6 +119,46 @@ type BackfillOptions struct {
 	ProgressEvery int
 }
 
+// ReconcileDen resets meta.vector_coverage_den to the live COUNT(*) of
+// active entries (status NOT IN ('archived','parked')). Runs inside a
+// single BEGIN IMMEDIATE so the write is atomic with respect to concurrent
+// Inscribe or Seal calls.
+//
+// Call this at the start of Backfill so any den drift accumulated between
+// the migration seed and the first backfill is repaired before we compare
+// num to den. QUEST-220 / LORE-373.
+func ReconcileDen(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("embed: ReconcileDen: nil db")
+	}
+	conn, rollback, err := beginImmediateLocal(ctx, db, "reconcile-den")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
+
+	var count int64
+	if err := conn.QueryRowContext(ctx, sqlCountActive).Scan(&count); err != nil {
+		return fmt.Errorf("embed: ReconcileDen: count active: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES ('vector_coverage_den', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		strconv.FormatInt(count, 10),
+	); err != nil {
+		return fmt.Errorf("embed: ReconcileDen: upsert den: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("embed: ReconcileDen: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // Backfill embeds every pending entry and writes a row into lore_vectors
 // for each. Idempotent on re-run: the candidate scan is a LEFT JOIN that
 // already excludes rows that have vectors, so a second Backfill against
@@ -115,6 +183,14 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 	}
 
 	start := time.Now()
+
+	// Reconcile den before scanning so any drift from entries inscribed
+	// between the migration seed and this first Backfill is corrected
+	// before we write coverage_num. Keeps num <= den invariant. QUEST-220.
+	if err := ReconcileDen(ctx, opts.DB); err != nil {
+		return nil, fmt.Errorf("embed: Backfill: reconcile den: %w", err)
+	}
+
 	pending, err := scanPending(ctx, opts.DB)
 	if err != nil {
 		return nil, fmt.Errorf("embed: Backfill: scan pending: %w", err)
@@ -202,9 +278,7 @@ func Invalidate(ctx context.Context, db *sql.DB, newIdentity ManifestIdentity) e
 	if _, err := conn.ExecContext(ctx, `DELETE FROM lore_vectors`); err != nil {
 		return fmt.Errorf("embed: Invalidate: delete vectors: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx,
-		`UPDATE entries SET vector_state = 'pending' WHERE status NOT IN ('archived','parked')`,
-	); err != nil {
+	if _, err := conn.ExecContext(ctx, sqlInvalidateFlipPending); err != nil {
 		return fmt.Errorf("embed: Invalidate: flip vector_state: %w", err)
 	}
 	// Bump epoch so readers refresh their caches.
@@ -242,14 +316,7 @@ func Invalidate(ctx context.Context, db *sql.DB, newIdentity ManifestIdentity) e
 // runs. Summary is pulled from entries.summary (ADR-003's canonical
 // embedding input).
 func scanPending(ctx context.Context, db *sql.DB) ([]PendingEntry, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT e.id, e.summary
-		FROM   entries e
-		LEFT   JOIN lore_vectors v ON v.entry_id = e.id
-		WHERE  v.entry_id IS NULL
-		  AND  e.status NOT IN ('archived','parked')
-		ORDER  BY e.id ASC
-	`)
+	rows, err := db.QueryContext(ctx, sqlScanPending)
 	if err != nil {
 		return nil, err
 	}

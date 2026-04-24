@@ -153,3 +153,26 @@ const (
 	// log grepping.
 	MetaEmbedErrorCount MetaKey = "embed_error_count"
 )
+
+// activeEntriesPredicate is the canonical SQL fragment that filters the set
+// of entries eligible for embedding. Every site that reads or writes
+// vector_coverage_den or vector_coverage_num must use this constant so the
+// predicate stays in sync across Inscribe, Seal, Restore, and Backfill.
+//
+// Matches the seeding WHERE clause in migration 003.
+const activeEntriesPredicate = "status NOT IN ('archived', 'parked')"
+
+// sqlBumpCoverageDen is the canonical UPSERT for incrementing
+// meta.vector_coverage_den by one. Used by Inscribe and Restore.
+const sqlBumpCoverageDen = `INSERT INTO meta (key, value) VALUES ('vector_coverage_den', '1')
+ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`
+
+// sqlDecrCoverageDen is the canonical UPDATE for decrementing
+// meta.vector_coverage_den by one (floor 0). Used by Seal.
+const sqlDecrCoverageDen = `UPDATE meta
+SET value = CAST(
+  CASE WHEN CAST(value AS INTEGER) > 0
+       THEN CAST(value AS INTEGER) - 1
+       ELSE 0
+  END AS TEXT)
+WHERE key = 'vector_coverage_den'`

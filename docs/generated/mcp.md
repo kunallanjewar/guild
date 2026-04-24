@@ -2,7 +2,7 @@
 
 # guild MCP tool catalog
 
-Every tool a registered MCP client sees. 40 tools.
+Every tool a registered MCP client sees. 41 tools.
 
 ## Tools
 
@@ -12,6 +12,7 @@ Every tool a registered MCP client sees. 40 tools.
 - [`lore_appraise`](#lore_appraise) — Search lore before storing new knowledge or spawning research subagents.
 - [`lore_catalog`](#lore_catalog) — Bulk-import .md files under DIR as lore entries.
 - [`lore_commune`](#lore_commune) — Health report for oath bloat and duplicate lore.
+- [`lore_coverage_reconcile`](#lore_coverage_reconcile) — Reset meta.vector_coverage_den to the live COUNT(*) WHERE status NOT IN ('archived','parked') and report before/after values.
 - [`lore_dossier`](#lore_dossier) — Compile ~2000-token project context for subagent spawn prompts.
 - [`lore_echoes`](#lore_echoes) — List stale/decayed entries the next agent should review or reforge.
 - [`lore_embed_rebuild`](#lore_embed_rebuild) — Delete all lore_vectors rows for the active project, flip every active entry's vector_state to 'pending', then encode each entry and insert the resulting int8 vectors.
@@ -226,6 +227,28 @@ _no arguments_
       "description": "apply safe auto-remediation",
       "type": "boolean"
     },
+    "project": {
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+</details>
+
+## `lore_coverage_reconcile`
+
+Reset meta.vector_coverage_den to the live COUNT(*) WHERE status NOT IN ('archived','parked') and report before/after values. Corrects num > den drift that produces coverage > 100%. Backfill also runs this automatically, so this command is a manual escape hatch.
+
+_no arguments_
+
+<details><summary>Raw JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
     "project": {
       "type": "string"
     }

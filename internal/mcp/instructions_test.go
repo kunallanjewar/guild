@@ -30,7 +30,7 @@ import (
 // project content"; (3) lore-summaries paragraph: "Implementation detail
 // goes in" → "Detail goes in"; (4) transfer-reasoning heading: "carry
 // implementation detail" → "carry the detail".
-const wantStaticSHA = "4020e2424108def5c885a37cc5b9e53f5ac51c96b77f231830a7a6d318ffb6ef"
+const wantStaticSHA = "5c95845f84d8a56de82638073cf49af183ba6853a7692f0f0666c36e9421afec"
 
 func TestStaticInstructions_Embedded(t *testing.T) {
 	if staticInstructions == "" {
