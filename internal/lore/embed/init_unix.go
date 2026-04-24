@@ -13,11 +13,18 @@ func newBGEEmbedderFromExt(ext *ExtractResult) (Embedder, func(), error) {
 	if ext == nil {
 		return nil, func() {}, fmt.Errorf("embed: newBGEEmbedderFromExt: nil ExtractResult")
 	}
+	// NumThreads=1 during the probe run eliminates intra-op thread
+	// scheduling as a source of float32 accumulation-order drift. The
+	// reference fixture was captured single-threaded; mismatching that
+	// reintroduces the cross-machine noise QUEST-215 was filed to kill.
+	// Backfill and real inference do not share this handle; they go
+	// through embed_wiring.go which constructs its own embedder with the
+	// production thread count.
 	emb, err := NewBGEEmbedder(RuntimeConfig{
 		LibraryPath: ext.LibraryPath,
 		ModelPath:   ext.ModelPath,
 		VocabPath:   ext.VocabPath,
-		NumThreads:  0,
+		NumThreads:  1,
 	})
 	if err != nil {
 		return nil, func() {}, err
