@@ -258,7 +258,7 @@ func TestEmbedProvider_EpochReloadPath(t *testing.T) {
 	flipMeta(t, dbPath, "vector_epoch", "1")
 	insertVectorRow(t, dbPath, 1, "bge-small-en-v1.5-int8-cls")
 
-	idx := embed.NewIndex("bge-small-en-v1.5-int8-cls")
+	idx := embed.NewIndex(embed.LoreCorpus{}, "bge-small-en-v1.5-int8-cls")
 	db, err := storage.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
