@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // RuntimeConfig points at the three on-disk artifacts the BGE unix path
@@ -76,6 +77,17 @@ type ExtractResult struct {
 	// (fresh bundle or checksum drift). False when every file matched
 	// its manifest SHA on entry.
 	Extracted bool
+	// Per-asset wall-clock durations for the init-timing diagnostic
+	// (LORE-368). Each covers only its own verifyOrWrite call.
+	// Structured slog field names:
+	//   extract_duration_ms_dylib  - libonnxruntime dylib / .so
+	//   extract_duration_ms_model  - model.onnx
+	//   extract_duration_ms_vocab  - vocab.txt
+	//   extract_duration_ms_total  - sum of all three
+	DylibDuration time.Duration
+	ModelDuration time.Duration
+	VocabDuration time.Duration
+	TotalDuration time.Duration
 }
 
 // ResolveCacheDir returns the absolute cache directory for the current
@@ -122,9 +134,12 @@ func Extract(m Manifest, cacheDir string) (*ExtractResult, error) {
 	}
 
 	res := &ExtractResult{CacheDir: cacheDir}
+	extractStart := time.Now()
 	for i, entry := range m.Assets {
 		path := filepath.Join(cacheDir, entry.Name)
+		assetStart := time.Now()
 		wrote, err := verifyOrWrite(path, entry.Bytes, entry.SHA256, os.FileMode(entry.Mode))
+		dur := time.Since(assetStart)
 		if err != nil {
 			return nil, fmt.Errorf("embed: extract %q: %w", entry.Name, err)
 		}
@@ -134,12 +149,16 @@ func Extract(m Manifest, cacheDir string) (*ExtractResult, error) {
 		switch i {
 		case AssetLibrary:
 			res.LibraryPath = path
+			res.DylibDuration = dur
 		case AssetModel:
 			res.ModelPath = path
+			res.ModelDuration = dur
 		case AssetVocab:
 			res.VocabPath = path
+			res.VocabDuration = dur
 		}
 	}
+	res.TotalDuration = time.Since(extractStart)
 	return res, nil
 }
 
