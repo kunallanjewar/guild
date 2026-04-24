@@ -38,32 +38,15 @@ import (
 )
 
 // activeEntriesPredicate is the embed-package copy of the canonical predicate
-// for entries eligible for vector embedding. The lore package maintains an
-// identical copy in types.go; they cannot share it because internal/lore/embed
-// must not import internal/lore (hexagonal boundary).
+// for entries eligible for vector embedding on the LORE corpus. The lore
+// package maintains an identical copy in types.go; they cannot share it
+// because internal/lore/embed must not import internal/lore (hexagonal
+// boundary).
 //
 // Value must stay in sync with lore.activeEntriesPredicate and migration 003.
+// LoreCorpus.ActivePredicate returns this constant so algorithms that take a
+// VectorCorpus see the same predicate through the port.
 const activeEntriesPredicate = "status NOT IN ('archived', 'parked')"
-
-// sqlCountActive is the COUNT query used by ReconcileDen. Pre-built as a
-// constant so sqlcheck does not flag string concatenation at the call site.
-const sqlCountActive = "SELECT COUNT(*) FROM entries WHERE " + activeEntriesPredicate
-
-// sqlScanPending is the full LEFT JOIN query that finds entries with no
-// vector row whose status makes them embedding-eligible. Pre-built so
-// sqlcheck sees a single constant identifier at the call site.
-const sqlScanPending = `
-	SELECT e.id, e.summary
-	FROM   entries e
-	LEFT   JOIN lore_vectors v ON v.entry_id = e.id
-	WHERE  v.entry_id IS NULL
-	  AND  e.` + activeEntriesPredicate + `
-	ORDER  BY e.id ASC
-`
-
-// sqlInvalidateFlipPending is the UPDATE that flips every active entry back
-// to vector_state='pending' during Invalidate.
-const sqlInvalidateFlipPending = "UPDATE entries SET vector_state = 'pending' WHERE " + activeEntriesPredicate
 
 // PendingEntry is one row that needs an embedding. Backfill iterates
 // these and encodes Summary (the ADR-003 canonical embedding input).
@@ -99,13 +82,19 @@ type BackfillResult struct {
 // injection (no package globals) so tests can pass a canned Embedder
 // and capture progress.
 type BackfillOptions struct {
-	// DB is the lore database handle.
+	// DB is the database handle. The corpus's tables and meta keys
+	// must exist in this DB; Backfill does not run migrations.
 	DB *sql.DB
+	// Corpus names the tables, columns, and meta keys Backfill
+	// operates against. Zero value falls back to LoreCorpus{} for
+	// backward compatibility with callers that predate the port.
+	Corpus VectorCorpus
 	// Embedder produces the float32 vectors. Must be non-nil; use
 	// NullEmbedder to short-circuit when the probe failed.
 	Embedder Embedder
-	// ModelID goes into lore_vectors.model_id for every row written.
-	// Should match meta.embedder_model_id (the caller enforces this).
+	// ModelID goes into the vector table's model_id column for every
+	// row written. Should match the corpus's EmbedderModelID meta row
+	// (the caller enforces this).
 	ModelID string
 	// ProgressOut receives one "[NN%] NN/NN entries" line per tick.
 	// Nil or io.Discard silences progress.
@@ -119,17 +108,34 @@ type BackfillOptions struct {
 	ProgressEvery int
 }
 
-// ReconcileDen resets meta.vector_coverage_den to the live COUNT(*) of
-// active entries (status NOT IN ('archived','parked')). Runs inside a
-// single BEGIN IMMEDIATE so the write is atomic with respect to concurrent
-// Inscribe or Seal calls.
+// resolveCorpus returns opts.Corpus or the default LoreCorpus when
+// unset. Callers that want a non-lore corpus must set opts.Corpus
+// explicitly; the default keeps every existing caller working without
+// touching their construction code.
+func (o BackfillOptions) resolveCorpus() VectorCorpus {
+	if o.Corpus == nil {
+		return LoreCorpus{}
+	}
+	return o.Corpus
+}
+
+// ReconcileDen resets the corpus's vector_coverage_den meta row to the
+// live COUNT(*) of active entities (whatever the corpus's
+// ActivePredicate filters to). Runs inside a single BEGIN IMMEDIATE so
+// the write is atomic with respect to concurrent writers.
 //
 // Call this at the start of Backfill so any den drift accumulated between
 // the migration seed and the first backfill is repaired before we compare
 // num to den. QUEST-220 / LORE-373.
-func ReconcileDen(ctx context.Context, db *sql.DB) error {
+//
+// Pass nil corpus for LoreCorpus default (backward compat for callers
+// that predate the port).
+func ReconcileDen(ctx context.Context, db *sql.DB, corpus VectorCorpus) error {
 	if db == nil {
 		return fmt.Errorf("embed: ReconcileDen: nil db")
+	}
+	if corpus == nil {
+		corpus = LoreCorpus{}
 	}
 	conn, rollback, err := beginImmediateLocal(ctx, db, "reconcile-den")
 	if err != nil {
@@ -139,17 +145,23 @@ func ReconcileDen(ctx context.Context, db *sql.DB) error {
 	committed := false
 	defer rollback(&committed)
 
+	// Count query is templated off corpus.EntityTable +
+	// corpus.ActivePredicate. Both values originate in compile-time
+	// adapter code.
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s`,
+		corpus.EntityTable(), corpus.ActivePredicate())
 	var count int64
-	if err := conn.QueryRowContext(ctx, sqlCountActive).Scan(&count); err != nil {
+	if err := conn.QueryRowContext(ctx, countQuery).Scan(&count); err != nil { //nolint:sqlcheck // table + predicate are compile-time corpus accessors.
 		return fmt.Errorf("embed: ReconcileDen: count active: %w", err)
 	}
 
+	denKey := corpus.MetaKey(FieldVectorCoverageDen)
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO meta (key, value) VALUES ('vector_coverage_den', ?)
+		`INSERT INTO meta (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-		strconv.FormatInt(count, 10),
+		denKey, strconv.FormatInt(count, 10),
 	); err != nil {
-		return fmt.Errorf("embed: ReconcileDen: upsert den: %w", err)
+		return fmt.Errorf("embed: ReconcileDen: upsert %s: %w", denKey, err)
 	}
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
@@ -181,17 +193,18 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 	if opts.ProgressEvery <= 0 {
 		opts.ProgressEvery = 10
 	}
+	corpus := opts.resolveCorpus()
 
 	start := time.Now()
 
-	// Reconcile den before scanning so any drift from entries inscribed
+	// Reconcile den before scanning so any drift from entities inserted
 	// between the migration seed and this first Backfill is corrected
 	// before we write coverage_num. Keeps num <= den invariant. QUEST-220.
-	if err := ReconcileDen(ctx, opts.DB); err != nil {
+	if err := ReconcileDen(ctx, opts.DB, corpus); err != nil {
 		return nil, fmt.Errorf("embed: Backfill: reconcile den: %w", err)
 	}
 
-	pending, err := scanPending(ctx, opts.DB)
+	pending, err := scanPending(ctx, opts.DB, corpus)
 	if err != nil {
 		return nil, fmt.Errorf("embed: Backfill: scan pending: %w", err)
 	}
@@ -199,7 +212,7 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 	if res.Total == 0 {
 		// Still bump epoch so a caller waiting on the index refresh
 		// sees a fresh value; zero-pending is a valid no-op.
-		epoch, err := bumpEpoch(ctx, opts.DB)
+		epoch, err := bumpEpoch(ctx, opts.DB, corpus)
 		if err != nil {
 			return nil, fmt.Errorf("embed: Backfill: bump epoch (empty run): %w", err)
 		}
@@ -232,7 +245,7 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 			res.Failed++
 			continue
 		}
-		if err := insertVectorRow(ctx, opts.DB, entry, vec, opts.ModelID); err != nil {
+		if err := insertVectorRow(ctx, opts.DB, corpus, entry, vec, opts.ModelID); err != nil {
 			res.Failed++
 			// DB-level error on a single row: keep going. A second run
 			// of Backfill will pick the row up again via LEFT JOIN.
@@ -248,7 +261,7 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 		}
 	}
 	res.Skipped = res.Total - res.Embedded - res.Failed
-	epoch, err := bumpEpoch(ctx, opts.DB)
+	epoch, err := bumpEpoch(ctx, opts.DB, corpus)
 	if err != nil {
 		return res, fmt.Errorf("embed: Backfill: bump epoch: %w", err)
 	}
@@ -257,15 +270,22 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 	return res, nil
 }
 
-// Invalidate drops every lore_vectors row, flips every active entry's
-// vector_state back to 'pending', and writes the new embedder identity
-// into meta. Used on model-identity upgrade (ADR-003 invariant 2).
+// Invalidate drops every vector row for the corpus, flips every
+// active entity's vector_state back to 'pending' (when the corpus
+// tracks state), and writes the new embedder identity into the
+// corpus's meta rows. Used on model-identity upgrade (ADR-003
+// invariant 2).
 //
 // Runs inside a single BEGIN IMMEDIATE transaction so a concurrent
 // reader cannot see a half-invalidated state.
-func Invalidate(ctx context.Context, db *sql.DB, newIdentity ManifestIdentity) error {
+//
+// Pass nil corpus for LoreCorpus default (backward compat).
+func Invalidate(ctx context.Context, db *sql.DB, corpus VectorCorpus, newIdentity ManifestIdentity) error {
 	if db == nil {
 		return fmt.Errorf("embed: Invalidate: nil db")
+	}
+	if corpus == nil {
+		corpus = LoreCorpus{}
 	}
 	conn, rollback, err := beginImmediateLocal(ctx, db, "invalidate")
 	if err != nil {
@@ -275,25 +295,35 @@ func Invalidate(ctx context.Context, db *sql.DB, newIdentity ManifestIdentity) e
 	committed := false
 	defer rollback(&committed)
 
-	if _, err := conn.ExecContext(ctx, `DELETE FROM lore_vectors`); err != nil {
+	deleteQuery := fmt.Sprintf(`DELETE FROM %s`, corpus.VectorTable())
+	if _, err := conn.ExecContext(ctx, deleteQuery); err != nil { //nolint:sqlcheck // table name is a compile-time corpus accessor.
 		return fmt.Errorf("embed: Invalidate: delete vectors: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx, sqlInvalidateFlipPending); err != nil {
-		return fmt.Errorf("embed: Invalidate: flip vector_state: %w", err)
+	// Flip state only when the corpus tracks it. A corpus that opts
+	// out of state tracking (VectorStateColumn() == "") simply skips
+	// this step; its Backfill rescan is driven purely by the LEFT JOIN
+	// on the vector table.
+	if stateCol := corpus.VectorStateColumn(); stateCol != "" {
+		flipQuery := fmt.Sprintf(`UPDATE %s SET %s = 'pending' WHERE %s`,
+			corpus.EntityTable(), stateCol, corpus.ActivePredicate())
+		if _, err := conn.ExecContext(ctx, flipQuery); err != nil { //nolint:sqlcheck // table + column + predicate are compile-time corpus accessors.
+			return fmt.Errorf("embed: Invalidate: flip vector_state: %w", err)
+		}
 	}
 	// Bump epoch so readers refresh their caches.
-	newEpoch, err := readEpochTx(ctx, conn)
+	epochKey := corpus.MetaKey(FieldVectorEpoch)
+	newEpoch, err := readEpochTxKey(ctx, conn, epochKey)
 	if err != nil {
 		return err
 	}
 	newEpoch++
 	upserts := []struct{ k, v string }{
-		{"embedder_model_id", newIdentity.ModelID},
-		{"embedder_tokenizer_hash", newIdentity.TokenizerHash},
-		{"embedder_runtime_version", newIdentity.RuntimeVersion},
-		{"embedder_dim", strconv.Itoa(newIdentity.Dim)},
-		{"vector_epoch", strconv.FormatInt(newEpoch, 10)},
-		{"vector_coverage_num", "0"},
+		{corpus.MetaKey(FieldEmbedderModelID), newIdentity.ModelID},
+		{corpus.MetaKey(FieldEmbedderTokenizerHash), newIdentity.TokenizerHash},
+		{corpus.MetaKey(FieldEmbedderRuntimeVersion), newIdentity.RuntimeVersion},
+		{corpus.MetaKey(FieldEmbedderDim), strconv.Itoa(newIdentity.Dim)},
+		{epochKey, strconv.FormatInt(newEpoch, 10)},
+		{corpus.MetaKey(FieldVectorCoverageNum), "0"},
 	}
 	for _, kv := range upserts {
 		if _, err := conn.ExecContext(ctx,
@@ -311,35 +341,67 @@ func Invalidate(ctx context.Context, db *sql.DB, newIdentity ManifestIdentity) e
 	return nil
 }
 
-// scanPending returns every entry with no lore_vectors row whose status
-// is not archived or parked. Ordered by id ASC for deterministic test
-// runs. Summary is pulled from entries.summary (ADR-003's canonical
-// embedding input).
-func scanPending(ctx context.Context, db *sql.DB) ([]PendingEntry, error) {
-	rows, err := db.QueryContext(ctx, sqlScanPending)
+// scanPending returns every active entity with no vector row in the
+// corpus's vector table. Ordered by id ASC for deterministic test
+// runs.
+//
+// The query templates a LEFT JOIN between corpus.EntityTable() and
+// corpus.VectorTable() on corpus.EntityIDColumn() and filters by the
+// corpus's ActivePredicate. Each entity's source text is pulled
+// through corpus.SourceText so a per-corpus text-assembly scheme can
+// concatenate, truncate, or rewrite freely without changing this
+// driver loop.
+func scanPending(ctx context.Context, db *sql.DB, corpus VectorCorpus) ([]PendingEntry, error) {
+	// Two-phase: first select the IDs of active entities without a
+	// vector row, then pull SourceText per id via the corpus adapter.
+	// Keeping the scan query free of the summary column lets future
+	// corpora assemble text from multiple columns without forcing the
+	// scan to know which columns exist.
+	activePred := corpus.ActivePredicate()
+	// Guard: an empty ActivePredicate produces a malformed AND clause.
+	// Corpora that want "all entities" should return "1=1".
+	if activePred == "" {
+		activePred = "1=1"
+	}
+	query := fmt.Sprintf(`SELECT e.%[1]s FROM %[2]s e LEFT JOIN %[3]s v ON v.entry_id = e.%[1]s WHERE v.entry_id IS NULL AND e.%[4]s ORDER BY e.%[1]s ASC`, corpus.EntityIDColumn(), corpus.EntityTable(), corpus.VectorTable(), activePred) //nolint:gosec // G201: all substitutions are compile-time corpus accessors, not user input.
+	rows, err := db.QueryContext(ctx, query)                                                                                                                                                                                                 //nolint:sqlcheck // all parts are compile-time corpus accessors.
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []PendingEntry
+	var ids []int64
 	for rows.Next() {
-		var p PendingEntry
-		if err := rows.Scan(&p.ID, &p.Summary); err != nil {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		out = append(out, p)
+		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	out := make([]PendingEntry, 0, len(ids))
+	for _, id := range ids {
+		text, err := corpus.SourceText(ctx, db, id)
+		if err != nil {
+			// A deleted-mid-backfill row surfaces as sql.ErrNoRows;
+			// treat it as "skip this id" rather than failing the scan.
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, fmt.Errorf("embed: scanPending: source text for id=%d: %w", id, err)
+		}
+		out = append(out, PendingEntry{ID: id, Summary: text})
+	}
 	return out, nil
 }
 
-// insertVectorRow writes one row into lore_vectors for entry. Uses
-// INSERT OR IGNORE so a concurrent writer that raced us to this row is
-// not treated as an error (ADR-003 invariant 1). Flips the parent
-// entry's vector_state to 'indexed' in the same tx.
-func insertVectorRow(ctx context.Context, db *sql.DB, entry PendingEntry, vec []float32, modelID string) error {
+// insertVectorRow writes one row into the corpus's vector table for
+// entry. Uses INSERT OR IGNORE so a concurrent writer that raced us
+// to this row is not treated as an error (ADR-003 invariant 1). Flips
+// the parent entity's vector_state to 'indexed' in the same tx when
+// the corpus tracks state.
+func insertVectorRow(ctx context.Context, db *sql.DB, corpus VectorCorpus, entry PendingEntry, vec []float32, modelID string) error {
 	conn, rollback, err := beginImmediateLocal(ctx, db, "backfill-row")
 	if err != nil {
 		return err
@@ -349,9 +411,9 @@ func insertVectorRow(ctx context.Context, db *sql.DB, entry PendingEntry, vec []
 	defer rollback(&committed)
 
 	// Canonical int8 quantization lives in cosine.go (Quantize, VecDim=384,
-	// symmetric scale of 127). The lore_vectors.vec BLOB is exactly VecDim
-	// bytes; reinterpret []int8 as []byte via a copy. See ADR-003 storage
-	// layout and QUEST-209 LoadFromDB which rejects any other length.
+	// symmetric scale of 127). The vector BLOB is exactly VecDim bytes;
+	// reinterpret []int8 as []byte via a copy. See ADR-003 storage layout
+	// and Index.LoadFromDB which rejects any other length.
 	quant := Quantize(vec)
 	if quant == nil {
 		return fmt.Errorf("quantize: got %d float32, want %d", len(vec), VecDim)
@@ -364,24 +426,27 @@ func insertVectorRow(ctx context.Context, db *sql.DB, entry PendingEntry, vec []
 	hashHex := hex.EncodeToString(hash[:])
 	now := time.Now().UTC().Unix()
 
-	if _, err := conn.ExecContext(ctx, `
-		INSERT OR IGNORE INTO lore_vectors
-		  (entry_id, model_id, dim, vec, encoded_at, content_hash)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, entry.ID, modelID, Dim, blob, now, hashHex); err != nil {
+	insertQuery := fmt.Sprintf(
+		`INSERT OR IGNORE INTO %s (entry_id, model_id, dim, vec, encoded_at, content_hash) VALUES (?, ?, ?, ?, ?, ?)`,
+		corpus.VectorTable(),
+	)
+	if _, err := conn.ExecContext(ctx, insertQuery, //nolint:sqlcheck // table name is a compile-time corpus accessor.
+		entry.ID, modelID, Dim, blob, now, hashHex); err != nil {
 		return fmt.Errorf("insert vector: %w", err)
 	}
-	if _, err := conn.ExecContext(ctx,
-		`UPDATE entries SET vector_state = 'indexed' WHERE id = ?`,
-		entry.ID,
-	); err != nil {
-		return fmt.Errorf("flip vector_state: %w", err)
+	if stateCol := corpus.VectorStateColumn(); stateCol != "" {
+		flipQuery := fmt.Sprintf(`UPDATE %s SET %s = 'indexed' WHERE %s = ?`,
+			corpus.EntityTable(), stateCol, corpus.EntityIDColumn())
+		if _, err := conn.ExecContext(ctx, flipQuery, entry.ID); err != nil { //nolint:sqlcheck // table + columns are compile-time corpus accessors.
+			return fmt.Errorf("flip vector_state: %w", err)
+		}
 	}
 	// coverage++ inside the same tx so counter never drifts from
 	// actual vector rows.
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO meta (key,value) VALUES ('vector_coverage_num','1')
+		`INSERT INTO meta (key,value) VALUES (?,'1')
 		 ON CONFLICT(key) DO UPDATE SET value = CAST((CAST(value AS INTEGER) + 1) AS TEXT)`,
+		corpus.MetaKey(FieldVectorCoverageNum),
 	); err != nil {
 		return fmt.Errorf("bump coverage: %w", err)
 	}
@@ -392,9 +457,10 @@ func insertVectorRow(ctx context.Context, db *sql.DB, entry PendingEntry, vec []
 	return nil
 }
 
-// bumpEpoch atomically increments meta.vector_epoch and returns the new
-// value. Uses BEGIN IMMEDIATE so concurrent writers serialize.
-func bumpEpoch(ctx context.Context, db *sql.DB) (int64, error) {
+// bumpEpoch atomically increments the corpus's vector_epoch meta row
+// and returns the new value. Uses BEGIN IMMEDIATE so concurrent
+// writers serialize.
+func bumpEpoch(ctx context.Context, db *sql.DB, corpus VectorCorpus) (int64, error) {
 	conn, rollback, err := beginImmediateLocal(ctx, db, "bump-epoch")
 	if err != nil {
 		return 0, err
@@ -403,15 +469,16 @@ func bumpEpoch(ctx context.Context, db *sql.DB) (int64, error) {
 	committed := false
 	defer rollback(&committed)
 
-	cur, err := readEpochTx(ctx, conn)
+	epochKey := corpus.MetaKey(FieldVectorEpoch)
+	cur, err := readEpochTxKey(ctx, conn, epochKey)
 	if err != nil {
 		return 0, err
 	}
 	next := cur + 1
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO meta (key,value) VALUES ('vector_epoch', ?)
+		`INSERT INTO meta (key,value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		strconv.FormatInt(next, 10),
+		epochKey, strconv.FormatInt(next, 10),
 	); err != nil {
 		return 0, fmt.Errorf("write epoch: %w", err)
 	}
@@ -422,25 +489,25 @@ func bumpEpoch(ctx context.Context, db *sql.DB) (int64, error) {
 	return next, nil
 }
 
-// readEpochTx reads the current meta.vector_epoch from an already-open
-// conn. Returns 0 when the row is missing (fresh DB) so callers can
-// always use the returned value.
-func readEpochTx(ctx context.Context, conn *sql.Conn) (int64, error) {
+// readEpochTxKey reads the given corpus-resolved meta epoch key from
+// an already-open conn. Returns 0 when the row is missing (fresh DB)
+// so callers can always use the returned value.
+func readEpochTxKey(ctx context.Context, conn *sql.Conn, key string) (int64, error) {
 	var s sql.NullString
 	if err := conn.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key = 'vector_epoch'`,
+		`SELECT value FROM meta WHERE key = ?`, key,
 	).Scan(&s); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("read epoch: %w", err)
+		return 0, fmt.Errorf("read epoch %s: %w", key, err)
 	}
 	if !s.Valid || s.String == "" {
 		return 0, nil
 	}
 	n, err := strconv.ParseInt(s.String, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("parse epoch %q: %w", s.String, err)
+		return 0, fmt.Errorf("parse epoch %s %q: %w", key, s.String, err)
 	}
 	return n, nil
 }

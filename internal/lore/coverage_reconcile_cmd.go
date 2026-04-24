@@ -67,7 +67,7 @@ var CoverageReconcileCommand = &command.Command[CoverageReconcileInput, Coverage
 		denBefore := before.CoverageDen
 
 		// Run the reconcile.
-		if err := embed.ReconcileDen(ctx, db); err != nil {
+		if err := embed.ReconcileDen(ctx, db, embed.LoreCorpus{}); err != nil {
 			return CoverageReconcileOutput{}, fmt.Errorf("lore: coverage-reconcile: %w", err)
 		}
 

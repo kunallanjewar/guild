@@ -205,7 +205,7 @@ func TestInvalidate_DropsVectorsAndFlipsState(t *testing.T) {
 		t.Fatalf("archive: %v", err)
 	}
 	newIdent := ManifestIdentity{ModelID: "new", TokenizerHash: "abc", RuntimeVersion: "v2", Dim: Dim}
-	if err := Invalidate(ctx, db, newIdent); err != nil {
+	if err := Invalidate(ctx, db, LoreCorpus{}, newIdent); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
 	var vecRows int
@@ -298,7 +298,7 @@ func TestReconcileDen_FixesDrift(t *testing.T) {
 		t.Fatalf("precondition: den=%d want 2", got)
 	}
 
-	if err := ReconcileDen(context.Background(), db); err != nil {
+	if err := ReconcileDen(context.Background(), db, LoreCorpus{}); err != nil {
 		t.Fatalf("ReconcileDen: %v", err)
 	}
 
@@ -356,7 +356,7 @@ func TestReconcileDen_ExcludesArchivedParked(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 
-	if err := ReconcileDen(ctx, db); err != nil {
+	if err := ReconcileDen(ctx, db, LoreCorpus{}); err != nil {
 		t.Fatalf("ReconcileDen: %v", err)
 	}
 

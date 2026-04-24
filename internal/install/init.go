@@ -568,7 +568,7 @@ func runEmbedderInit(ctx context.Context, loreDB *sql.DB, out io.Writer) {
 	}
 	if embed.IdentityChanged(stored, bound) {
 		fmt.Fprintln(out, "  [!] embedder model changed. Stop all running guild MCP servers before continuing.")
-		if err := embed.Invalidate(ctx, loreDB, bound); err != nil {
+		if err := embed.Invalidate(ctx, loreDB, embed.LoreCorpus{}, bound); err != nil {
 			fmt.Fprintf(out, "  [!] embedder invalidate failed: %s\n", err)
 			return
 		}
@@ -591,6 +591,7 @@ func runEmbedderInit(ctx context.Context, loreDB *sql.DB, out io.Writer) {
 	// embedder. Skips silently when pending=0.
 	res, err := embed.Backfill(ctx, embed.BackfillOptions{
 		DB:                loreDB,
+		Corpus:            embed.LoreCorpus{},
 		Embedder:          prep.Embedder,
 		ModelID:           outcome.Identity.ModelID,
 		ProgressOut:       out,
