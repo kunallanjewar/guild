@@ -103,7 +103,7 @@ func Test_ConcurrentInscribeAndAppraise_NoDeadlocksOrLostWrites(t *testing.T) {
 			seedEnabledEmbedder(t, db, modelID)
 
 			embedder := embed.NewDeterministicEmbedder()
-			index := embed.NewIndex(modelID)
+			index := embed.NewIndex(embed.LoreCorpus{}, modelID)
 			// Initial load against an empty vectors table seeds
 			// loaded=true so TopK does not return ErrIndexStale.
 			if _, err := index.LoadFromDB(ctx, db); err != nil {
@@ -262,7 +262,7 @@ func Test_Inscribe_RRF_VectorArmContributes_Integration(t *testing.T) {
 	seedEnabledEmbedder(t, db, modelID)
 
 	embedder := embed.NewDeterministicEmbedder()
-	index := embed.NewIndex(modelID)
+	index := embed.NewIndex(embed.LoreCorpus{}, modelID)
 	if _, err := index.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("initial load: %v", err)
 	}

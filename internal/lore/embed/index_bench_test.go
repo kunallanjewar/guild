@@ -108,7 +108,7 @@ func benchTopK(b *testing.B, n, k int) {
 // via Splice. Keeps the bench setup standalone (no DB, no embedder).
 func buildBenchIndex(b *testing.B, n int) *Index {
 	b.Helper()
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	// Splice requires a loaded index; a zero-row LoadFromDB would need
 	// a live DB. Seed the loaded flag by splicing the first vector
 	// after cosmetically "loading" via an empty Splice path.

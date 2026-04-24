@@ -173,7 +173,7 @@ func WireEmbedDeps(ctx context.Context, db *sql.DB, opts EmbedWireOptions) (*Emb
 	var idx *embed.Index
 	indexLen := 0
 	if opts.LoadIndex {
-		idx = embed.NewIndex(boundModelID, embed.WithLogger(logger))
+		idx = embed.NewIndex(embed.LoreCorpus{}, boundModelID, embed.WithLogger(logger))
 		n, lerr := idx.LoadFromDB(ctx, db)
 		if lerr != nil {
 			// Fail safe: log and continue without the index. The
