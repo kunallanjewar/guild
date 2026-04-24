@@ -232,7 +232,7 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 // WriteMeta upserts the embedder-identity meta rows from outcome into
 // db in one BEGIN IMMEDIATE transaction.
 //
-// Write semantics (Option A — extract-time identity):
+// Write semantics (Option A, extract-time identity):
 //
 //   - embedder_state and embedder_state_reason are always written.
 //   - embedder_model_id, embedder_tokenizer_hash, and embedder_runtime_version

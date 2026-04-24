@@ -1,6 +1,6 @@
 // init_test.go: regression tests for WriteMeta tokenizer_hash lifecycle.
 //
-// Decision (Option A — extract-time identity): embedder_tokenizer_hash,
+// Decision (Option A, extract-time identity): embedder_tokenizer_hash,
 // embedder_model_id, and embedder_runtime_version are written whenever
 // extract succeeds, regardless of probe outcome. These three fields are
 // deterministic digests of the bundled bytes; probe success is orthogonal
