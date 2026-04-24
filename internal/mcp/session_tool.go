@@ -9,6 +9,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/mathomhaus/guild/internal/lore"
+	"github.com/mathomhaus/guild/internal/lore/embed"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
 	"github.com/mathomhaus/guild/internal/session"
@@ -168,6 +169,7 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 	// graceful-degradation pattern in quest_agent.go.
 	var oathLoader quest.OathLoader
 	var echoLoader quest.EchoLoader
+	var embedderHealthLine string
 	loreDB, loreErr := openLoreDB(ctx)
 	if loreErr == nil && !briefOnly {
 		defer func() { _ = loreDB.Close() }()
@@ -193,6 +195,13 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 			}
 			return out, nil
 		}
+
+		// Read the embedder health line. Failures are swallowed: a missing
+		// meta table (pre-migration DB) must not break session-start.
+		// Only non-healthy states emit a line; healthy state returns "".
+		if report, hErr := embed.ReadHealthReport(ctx, loreDB); hErr == nil {
+			embedderHealthLine = report.SessionLine()
+		}
 	}
 
 	res, err := quest.Bounties(ctx, questDB, projectID, briefOnly, oathLoader, echoLoader)
@@ -201,7 +210,11 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 		// cleanly rather than bubbling a bootstrap failure.
 		return ""
 	}
-	return formatBounties(res, briefOnly)
+	body := formatBounties(res, briefOnly)
+	if embedderHealthLine != "" {
+		body += "\n" + embedderHealthLine + "\n"
+	}
+	return body
 }
 
 // formatBounties renders a BountiesResult as the text block the
