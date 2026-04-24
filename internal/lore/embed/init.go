@@ -1,0 +1,298 @@
+// Init: the full guild-init embedder bring-up path. Extract assets to
+// the cache directory, probe against the pinned reference vector, seed
+// meta identity, and return a ready-to-use Embedder (or the null
+// fallback if anything failed). Keeps the package self-contained so the
+// install/init code at internal/install/init.go can drive this with one
+// call and structured error handling.
+//
+// Returns an InitOutcome describing what happened, which the caller
+// feeds into the meta.embedder_state update and the init transcript.
+
+package embed
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"runtime"
+	"strconv"
+	"time"
+)
+
+// InitOutcome summarizes the embedder bring-up for logging + meta.
+type InitOutcome struct {
+	// State is the meta.embedder_state value the caller should write:
+	// "enabled" when the probe passed, "disabled" otherwise.
+	State string
+	// Reason is a short machine-parseable tag for disabled outcomes:
+	// "ok", "unsupported_platform", "no_assets", "extract_failed",
+	// "embedder_init_failed", "probe_mismatch", "probe_error".
+	Reason string
+	// Identity is the manifest-bound identity written into meta on a
+	// successful enable. Zero-value on disabled outcomes.
+	Identity ManifestIdentity
+	// CacheDir is the extraction target (empty on skip).
+	CacheDir string
+	// Extracted is true when Extract wrote bytes this call.
+	Extracted bool
+	// ProbeCosine is the cosine similarity against the pinned
+	// reference (0 on skipped probe).
+	ProbeCosine float64
+	// ExtractDuration + ProbeDuration are reported for the init
+	// transcript. Zero on skipped paths.
+	ExtractDuration time.Duration
+	ProbeDuration   time.Duration
+	// Err is the outer error surfaced to the caller for logging. The
+	// caller should still persist State="disabled" in meta; guild init
+	// never exits non-zero just because the embedder is off.
+	Err error
+}
+
+// PreparedEmbedder is a small handle the caller closes after the
+// outcome has been recorded. Nil when the outcome is disabled.
+type PreparedEmbedder struct {
+	Embedder Embedder
+	// close releases native resources. Safe to call multiple times.
+	close func()
+}
+
+// Close releases any native resources (ORT session, dylib). No-op on a
+// nil receiver.
+func (p *PreparedEmbedder) Close() {
+	if p == nil || p.close == nil {
+		return
+	}
+	p.close()
+}
+
+// PrepareAndProbe runs the full extract + construct + probe sequence.
+// On success, returns a non-nil PreparedEmbedder the caller should
+// defer-close. On any failure path, returns (nil, InitOutcome with
+// State="disabled", nil error at the function level) so guild init
+// always exits 0.
+//
+// logger is used for structured diagnostic lines. Pass a no-op logger
+// (slog.New(slog.NewTextHandler(io.Discard, nil))) to silence.
+func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedder, InitOutcome) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// Hard short-circuit on platforms where the unix-only BGE path
+	// cannot compile (Windows). ADR-003 invariant: init exits 0 with
+	// embedder_state=disabled, reason=unsupported_platform.
+	if runtime.GOOS == "windows" {
+		return nil, InitOutcome{
+			State:  "disabled",
+			Reason: "unsupported_platform",
+		}
+	}
+	man := CurrentManifest()
+	if !HasAssets() || !man.hasAssetBytes() {
+		logger.Info("embedder disabled: no bundled assets in this build",
+			slog.String("platform_tag", man.Identity.PlatformTag),
+			slog.String("goos", runtime.GOOS),
+			slog.String("goarch", runtime.GOARCH),
+		)
+		return nil, InitOutcome{
+			State:  "disabled",
+			Reason: "no_assets",
+		}
+	}
+	cacheDir, err := ResolveCacheDir(man)
+	if err != nil {
+		logger.Warn("embedder disabled: resolve cache dir failed",
+			slog.String("err", err.Error()),
+		)
+		return nil, InitOutcome{
+			State:  "disabled",
+			Reason: "extract_failed",
+			Err:    err,
+		}
+	}
+
+	startExtract := time.Now()
+	ext, err := Extract(man, cacheDir)
+	extractDur := time.Since(startExtract)
+	if err != nil {
+		logger.Warn("embedder disabled: extract failed",
+			slog.String("cache_dir", cacheDir),
+			slog.String("err", err.Error()),
+			slog.Duration("extract_duration", extractDur),
+		)
+		return nil, InitOutcome{
+			State:           "disabled",
+			Reason:          "extract_failed",
+			CacheDir:        cacheDir,
+			ExtractDuration: extractDur,
+			Err:             err,
+		}
+	}
+	logger.Info("embedder assets extracted",
+		slog.String("cache_dir", ext.CacheDir),
+		slog.Bool("extracted", ext.Extracted),
+		slog.String("library_path", ext.LibraryPath),
+		slog.String("model_sha256", man.Assets[AssetModel].SHA256),
+		slog.String("library_sha256", man.Assets[AssetLibrary].SHA256),
+		slog.Duration("extract_duration", extractDur),
+	)
+
+	emb, closeFn, err := newBGEEmbedderFromExt(ext)
+	if err != nil {
+		logger.Warn("embedder disabled: BGE init failed",
+			slog.String("err", err.Error()),
+		)
+		return nil, InitOutcome{
+			State:           "disabled",
+			Reason:          "embedder_init_failed",
+			CacheDir:        ext.CacheDir,
+			ExtractDuration: extractDur,
+			Err:             err,
+		}
+	}
+
+	startProbe := time.Now()
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	probe := RunProbe(probeCtx, emb)
+	cancel()
+	probeDur := time.Since(startProbe)
+	if probe.Err != nil {
+		reason := "probe_error"
+		if errors.Is(probe.Err, ErrProbeMismatch) {
+			reason = "probe_mismatch"
+		}
+		logger.Warn("embedder disabled: probe failed",
+			slog.String("reason", reason),
+			slog.Float64("cosine", probe.Cosine),
+			slog.Int("dim", probe.Dim),
+			slog.String("err", probe.Err.Error()),
+			slog.Duration("probe_duration", probeDur),
+		)
+		closeFn()
+		return nil, InitOutcome{
+			State:           "disabled",
+			Reason:          reason,
+			CacheDir:        ext.CacheDir,
+			Extracted:       ext.Extracted,
+			ExtractDuration: extractDur,
+			ProbeCosine:     probe.Cosine,
+			ProbeDuration:   probeDur,
+			Err:             probe.Err,
+		}
+	}
+	logger.Info("embedder probe passed",
+		slog.Float64("cosine", probe.Cosine),
+		slog.Int("dim", probe.Dim),
+		slog.Duration("probe_duration", probeDur),
+		slog.String("model_id", man.Identity.ModelID),
+		slog.String("tokenizer_hash", man.Identity.TokenizerHash),
+	)
+
+	return &PreparedEmbedder{
+			Embedder: emb,
+			close:    closeFn,
+		},
+		InitOutcome{
+			State:           "enabled",
+			Reason:          "ok",
+			Identity:        man.Identity,
+			CacheDir:        ext.CacheDir,
+			Extracted:       ext.Extracted,
+			ExtractDuration: extractDur,
+			ProbeCosine:     probe.Cosine,
+			ProbeDuration:   probeDur,
+		}
+}
+
+// WriteMeta upserts the embedder-identity meta rows from outcome into
+// db in one BEGIN IMMEDIATE transaction. Always writes state + reason;
+// only writes the identity rows when state="enabled". Safe to call for
+// both enabled and disabled outcomes; idempotent.
+func WriteMeta(ctx context.Context, db *sql.DB, outcome InitOutcome) error {
+	if db == nil {
+		return fmt.Errorf("embed: WriteMeta: nil db")
+	}
+	conn, rollback, err := beginImmediateLocal(ctx, db, "write-meta")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	committed := false
+	defer rollback(&committed)
+
+	rows := []struct{ k, v string }{
+		{"embedder_state", outcome.State},
+		{"embedder_state_reason", outcome.Reason},
+	}
+	if outcome.State == "enabled" {
+		rows = append(rows,
+			struct{ k, v string }{"embedder_model_id", outcome.Identity.ModelID},
+			struct{ k, v string }{"embedder_tokenizer_hash", outcome.Identity.TokenizerHash},
+			struct{ k, v string }{"embedder_runtime_version", outcome.Identity.RuntimeVersion},
+			struct{ k, v string }{"embedder_dim", strconv.Itoa(outcome.Identity.Dim)},
+		)
+	}
+	for _, kv := range rows {
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO meta (key,value) VALUES (?,?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			kv.k, kv.v,
+		); err != nil {
+			return fmt.Errorf("embed: WriteMeta: upsert %s: %w", kv.k, err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("embed: WriteMeta: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// ReadMeta reads the embedder identity + state rows from meta. Missing
+// rows return ("", "", ...) without error so callers can treat an empty
+// model_id as "never been embedded". Use HasIdentity to check.
+func ReadMeta(ctx context.Context, db *sql.DB) (storedModelID, storedTokenizerHash, state string, err error) {
+	if db == nil {
+		return "", "", "", fmt.Errorf("embed: ReadMeta: nil db")
+	}
+	for _, key := range []string{"embedder_model_id", "embedder_tokenizer_hash", "embedder_state"} {
+		var v sql.NullString
+		scanErr := db.QueryRowContext(ctx,
+			`SELECT value FROM meta WHERE key = ?`, key,
+		).Scan(&v)
+		if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+			return "", "", "", fmt.Errorf("embed: ReadMeta: read %s: %w", key, scanErr)
+		}
+		switch key {
+		case "embedder_model_id":
+			storedModelID = v.String
+		case "embedder_tokenizer_hash":
+			storedTokenizerHash = v.String
+		case "embedder_state":
+			state = v.String
+		}
+	}
+	return storedModelID, storedTokenizerHash, state, nil
+}
+
+// IdentityChanged reports whether storedID/storedHash differ from the
+// binary's bound identity. Treats an empty stored model_id as "same"
+// (fresh DB with only the seed value; no invalidation needed on the
+// first-ever run).
+func IdentityChanged(stored, bound ManifestIdentity) bool {
+	if stored.ModelID == "" {
+		return false
+	}
+	if stored.ModelID != bound.ModelID {
+		return true
+	}
+	// A non-empty stored tokenizer hash that differs from the binary's
+	// is an upgrade. An empty stored hash paired with a real bound
+	// hash is NOT treated as change: that is the first-enable case
+	// (the schema seed has tokenizer_hash='').
+	if stored.TokenizerHash != "" && stored.TokenizerHash != bound.TokenizerHash {
+		return true
+	}
+	return false
+}

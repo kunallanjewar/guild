@@ -164,6 +164,79 @@ docs-check: $(BIN_DIR) ## Verify docs/generated/* is up to date (CI gate)
 	@HOME=$$(mktemp -d) ./bin/docgen -out docs/generated -check
 
 # ----------------------------------------------------------------------
+# Embedded runtime assets (internal/lore/embed/assets/)
+# ----------------------------------------------------------------------
+
+##@ Assets
+
+# Source of truth for the model + vocab is the Phase 1 spike workspace.
+# Override ASSETS_SPIKE_DIR on the CLI to point at a different staging area.
+ASSETS_SPIKE_DIR ?= ../lares-spikes/guild-embedding-purego/workspace/models/bge-small-int8
+
+# Per-platform asset root.
+ASSETS_DIR := internal/lore/embed/assets
+
+# ONNX Runtime 1.23.x release tag. F2 from the spike friction log:
+# onnxruntime-purego pins ORT API v23, which ships in 1.23.x. Bumping
+# this requires an ADR because it changes the ABI the purego shim
+# assumes.
+ORT_VERSION ?= 1.23.0
+
+.PHONY: assets
+assets: ## Stage per-platform embedded runtime assets (model, vocab, libonnxruntime)
+	@mkdir -p $(ASSETS_DIR)/darwin_arm64 $(ASSETS_DIR)/darwin_amd64 \
+	          $(ASSETS_DIR)/linux_amd64  $(ASSETS_DIR)/linux_arm64
+	@$(MAKE) assets-model
+	@$(MAKE) assets-runtime
+	@echo "✓ assets staged under $(ASSETS_DIR)"
+
+.PHONY: assets-model
+assets-model: ## Copy model.onnx + vocab.txt into every platform subdir
+	@if [ ! -f $(ASSETS_SPIKE_DIR)/model.onnx ]; then \
+	  echo "✗ $(ASSETS_SPIKE_DIR)/model.onnx missing; set ASSETS_SPIKE_DIR"; exit 1; \
+	fi
+	@for triple in darwin_arm64 darwin_amd64 linux_amd64 linux_arm64; do \
+	  cp $(ASSETS_SPIKE_DIR)/model.onnx $(ASSETS_DIR)/$$triple/model.onnx; \
+	  cp $(ASSETS_SPIKE_DIR)/vocab.txt  $(ASSETS_DIR)/$$triple/vocab.txt; \
+	done
+	@echo "✓ model + vocab staged"
+
+.PHONY: assets-runtime
+assets-runtime: ## Download libonnxruntime per-platform from the ORT GitHub release
+	@command -v curl >/dev/null || { echo "curl not found on PATH"; exit 1; }
+	@tmp=$$(mktemp -d); \
+	for pair in \
+	  "darwin_arm64:osx-arm64:libonnxruntime.$(ORT_VERSION).dylib:libonnxruntime.dylib" \
+	  "darwin_amd64:osx-x86_64:libonnxruntime.$(ORT_VERSION).dylib:libonnxruntime.dylib" \
+	  "linux_amd64:linux-x64:libonnxruntime.so.$(ORT_VERSION):libonnxruntime.so" \
+	  "linux_arm64:linux-aarch64:libonnxruntime.so.$(ORT_VERSION):libonnxruntime.so" ; do \
+	    triple=$${pair%%:*}; rest=$${pair#*:}; \
+	    ortname=$${rest%%:*}; rest=$${rest#*:}; \
+	    libname=$${rest%%:*}; dst=$${rest#*:}; \
+	    target=$(ASSETS_DIR)/$$triple/$$dst; \
+	    if [ -f $$target ]; then echo "  keep $$target"; continue; fi; \
+	    url="https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VERSION)/onnxruntime-$$ortname-$(ORT_VERSION).tgz"; \
+	    tar=$$tmp/$$triple.tgz; \
+	    echo "  fetch $$url"; \
+	    curl -fsSL -o $$tar $$url; \
+	    tar -xzf $$tar -C $$tmp --strip-components=1 "onnxruntime-$$ortname-$(ORT_VERSION)/lib/$$libname"; \
+	    cp $$tmp/lib/$$libname $$target; \
+	    rm -f $$tar; \
+	done; \
+	rm -rf $$tmp
+	@echo "✓ libonnxruntime staged"
+
+.PHONY: assets-clean
+assets-clean: ## Remove every staged asset (keeps directories + README + .gitignore)
+	@find $(ASSETS_DIR) -type f \( -name 'model.onnx' -o -name 'vocab.txt' -o -name 'libonnxruntime.*' \) -delete
+	@echo "✓ assets cleaned"
+
+.PHONY: build-embed
+build-embed: assets ## Build the guild binary with embedded runtime assets (-tags=withembed)
+	$(GO) build $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/guild
+	@echo "✓ built $(BIN) with -tags=withembed"
+
+# ----------------------------------------------------------------------
 # Release
 # ----------------------------------------------------------------------
 
