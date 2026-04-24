@@ -449,6 +449,100 @@ func IsInteractiveTTYStdin() bool {
 	return isInteractiveTTY(os.Stdin)
 }
 
+// shaShort returns the first 12 hex characters of a SHA-256 digest for
+// human-readable output. Full-length SHAs are emitted in structured slog
+// fields; stdout carries only the prefix to stay compact (LORE-368).
+func shaShort(hex string) string {
+	if len(hex) <= 12 {
+		return hex
+	}
+	return hex[:12]
+}
+
+// printEmbedderOutcome writes the human-readable and structured-slog
+// diagnostic lines for an embedder bring-up outcome (LORE-368).
+//
+// Human stdout format (deterministic order: state -> timings -> cosine -> fingerprints):
+//
+//	success: one compact line (cosine, extract ms, probe ms)
+//	failure: state line + timings line + cosine line + sha/identity lines (probe-failure only)
+//
+// Slog fields emitted here (stable names; see InitOutcome comment for full list):
+//
+//	probe_cosine_observed, probe_cosine_floor,
+//	extract_duration_ms_dylib, extract_duration_ms_model,
+//	extract_duration_ms_vocab, extract_duration_ms_total,
+//	probe_duration_ms, extracted_dylib_sha256, extracted_model_sha256,
+//	extracted_vocab_sha256, model_id, tokenizer_hash.
+func printEmbedderOutcome(out io.Writer, logger *slog.Logger, outcome embed.InitOutcome) {
+	switch outcome.State {
+	case "enabled":
+		fmt.Fprintf(out, "  ✓ embedder enabled (cosine=%.4f, extract=%dms, probe=%dms)\n",
+			outcome.ProbeCosine,
+			outcome.ExtractDuration.Milliseconds(),
+			outcome.ProbeDuration.Milliseconds(),
+		)
+		logger.Info("embedder init complete",
+			slog.String("state", "enabled"),
+			slog.Float64("probe_cosine_observed", outcome.ProbeCosine),
+			slog.Float64("probe_cosine_floor", outcome.ProbeFloor),
+			slog.Int64("extract_duration_ms_dylib", outcome.DylibExtractDuration.Milliseconds()),
+			slog.Int64("extract_duration_ms_model", outcome.ModelExtractDuration.Milliseconds()),
+			slog.Int64("extract_duration_ms_vocab", outcome.VocabExtractDuration.Milliseconds()),
+			slog.Int64("extract_duration_ms_total", outcome.ExtractDuration.Milliseconds()),
+			slog.Int64("probe_duration_ms", outcome.ProbeDuration.Milliseconds()),
+			slog.String("model_id", outcome.Identity.ModelID),
+			slog.String("tokenizer_hash", outcome.Identity.TokenizerHash),
+		)
+	default:
+		fmt.Fprintf(out, "  [i] embedder disabled (reason=%s); BM25-only retrieval will be used\n", outcome.Reason)
+		// On probe failure, emit a triage block so the operator can
+		// diagnose without re-running. Deterministic order: timings ->
+		// cosine -> fingerprints (LORE-368).
+		if outcome.Reason == "probe_mismatch" || outcome.Reason == "probe_error" {
+			fmt.Fprintf(out, "      extract=%dms (dylib=%dms, model=%dms, vocab=%dms), probe=%dms\n",
+				outcome.ExtractDuration.Milliseconds(),
+				outcome.DylibExtractDuration.Milliseconds(),
+				outcome.ModelExtractDuration.Milliseconds(),
+				outcome.VocabExtractDuration.Milliseconds(),
+				outcome.ProbeDuration.Milliseconds(),
+			)
+			fmt.Fprintf(out, "      cosine observed=%.6f floor=%.6f\n",
+				outcome.ProbeCosine, outcome.ProbeFloor,
+			)
+			if outcome.DylibSHA256 != "" {
+				fmt.Fprintf(out, "      sha256: dylib=%s model=%s vocab=%s\n",
+					shaShort(outcome.DylibSHA256),
+					shaShort(outcome.ModelSHA256),
+					shaShort(outcome.VocabSHA256),
+				)
+			}
+			if outcome.Identity.ModelID != "" {
+				fmt.Fprintf(out, "      model_id=%s tokenizer_hash=%s\n",
+					outcome.Identity.ModelID,
+					outcome.Identity.TokenizerHash,
+				)
+			}
+		}
+		logger.Warn("embedder init complete",
+			slog.String("state", "disabled"),
+			slog.String("reason", outcome.Reason),
+			slog.Float64("probe_cosine_observed", outcome.ProbeCosine),
+			slog.Float64("probe_cosine_floor", outcome.ProbeFloor),
+			slog.Int64("extract_duration_ms_dylib", outcome.DylibExtractDuration.Milliseconds()),
+			slog.Int64("extract_duration_ms_model", outcome.ModelExtractDuration.Milliseconds()),
+			slog.Int64("extract_duration_ms_vocab", outcome.VocabExtractDuration.Milliseconds()),
+			slog.Int64("extract_duration_ms_total", outcome.ExtractDuration.Milliseconds()),
+			slog.Int64("probe_duration_ms", outcome.ProbeDuration.Milliseconds()),
+			slog.String("extracted_dylib_sha256", outcome.DylibSHA256),
+			slog.String("extracted_model_sha256", outcome.ModelSHA256),
+			slog.String("extracted_vocab_sha256", outcome.VocabSHA256),
+			slog.String("model_id", outcome.Identity.ModelID),
+			slog.String("tokenizer_hash", outcome.Identity.TokenizerHash),
+		)
+	}
+}
+
 // runEmbedderInit drives the ADR-003 Phase 1.5 embedder bring-up
 // against loreDB and writes the resulting meta rows. On enable, it
 // also runs the serial backfill. On every outcome it emits a one-line
@@ -488,15 +582,8 @@ func runEmbedderInit(ctx context.Context, loreDB *sql.DB, out io.Writer) {
 		fmt.Fprintf(out, "  [!] embedder write-meta failed: %s\n", werr)
 		return
 	}
-	switch outcome.State {
-	case "enabled":
-		fmt.Fprintf(out, "  ✓ embedder enabled (cosine=%.4f, extract=%s, probe=%s)\n",
-			outcome.ProbeCosine,
-			outcome.ExtractDuration.Round(1_000_000),
-			outcome.ProbeDuration.Round(1_000_000),
-		)
-	case "disabled":
-		fmt.Fprintf(out, "  [i] embedder disabled (reason=%s); BM25-only retrieval will be used\n", outcome.Reason)
+	printEmbedderOutcome(out, logger, outcome)
+	if outcome.State != "enabled" {
 		return
 	}
 
