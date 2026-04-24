@@ -153,33 +153,8 @@ func TestExtract_NoAssets_ReturnsErrNoAssets(t *testing.T) {
 	}
 }
 
-func TestQuantizeDequantize_RoundTrip(t *testing.T) {
-	in := []float32{0.1, -0.2, 0.5, 0, -0.5, 0.25}
-	q := QuantizeInt8(in)
-	if len(q) != 4+len(in) {
-		t.Fatalf("blob length: got %d want %d", len(q), 4+len(in))
-	}
-	out := DequantizeInt8(q)
-	if len(out) != len(in) {
-		t.Fatalf("round-trip length: got %d want %d", len(out), len(in))
-	}
-	// Max-abs = 0.5 → scale ≈ 0.5/127; tolerance 2 quanta.
-	tol := float32(2 * 0.5 / 127)
-	for i := range in {
-		d := out[i] - in[i]
-		if d < -tol || d > tol {
-			t.Errorf("index %d: in=%f out=%f diff=%f > tol=%f", i, in[i], out[i], d, tol)
-		}
-	}
-}
-
-func TestQuantizeDequantize_AllZero(t *testing.T) {
-	in := []float32{0, 0, 0, 0}
-	q := QuantizeInt8(in)
-	out := DequantizeInt8(q)
-	for i, v := range out {
-		if v != 0 {
-			t.Errorf("index %d: got %f want 0", i, v)
-		}
-	}
-}
+// Quantize/Dequantize round-trip tests live in cosine_test.go. The
+// legacy per-vector-scale helpers (QuantizeInt8 / DequantizeInt8) that
+// once lived in backfill.go have been removed in favor of the canonical
+// symmetric-127 convention in cosine.go; see the rewrite notes in
+// backfill.go insertVectorRow.

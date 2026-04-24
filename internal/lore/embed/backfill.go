@@ -29,12 +29,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"strconv"
 	"time"
 )
@@ -283,7 +281,18 @@ func insertVectorRow(ctx context.Context, db *sql.DB, entry PendingEntry, vec []
 	committed := false
 	defer rollback(&committed)
 
-	blob := QuantizeInt8(vec)
+	// Canonical int8 quantization lives in cosine.go (Quantize, VecDim=384,
+	// symmetric scale of 127). The lore_vectors.vec BLOB is exactly VecDim
+	// bytes; reinterpret []int8 as []byte via a copy. See ADR-003 storage
+	// layout and QUEST-209 LoadFromDB which rejects any other length.
+	quant := Quantize(vec)
+	if quant == nil {
+		return fmt.Errorf("quantize: got %d float32, want %d", len(vec), VecDim)
+	}
+	blob := make([]byte, VecDim)
+	for j, q := range quant {
+		blob[j] = byte(q)
+	}
 	hash := sha256.Sum256([]byte(entry.Summary))
 	hashHex := hex.EncodeToString(hash[:])
 	now := time.Now().UTC().Unix()
@@ -369,74 +378,10 @@ func readEpochTx(ctx context.Context, conn *sql.Conn) (int64, error) {
 	return n, nil
 }
 
-// QuantizeInt8 converts a float32 vector to a little-endian int8 blob,
-// scaled so that the maximum absolute value maps to 127. Matches the
-// spike's storage format; a fp32 vector with all zeros round-trips to
-// zeros. The scale is implicit (dim-wide max); callers who need the
-// scale back unpack with DequantizeInt8.
-//
-// Chosen location: the embedder package owns vector-bytes format so the
-// storage layer does not grow a dependency on ONNX. ADR-003 Phase 1 has
-// the index/reader responsible for dequantize; this function is the
-// write-side counterpart.
-func QuantizeInt8(v []float32) []byte {
-	if len(v) == 0 {
-		return nil
-	}
-	maxAbs := float32(0)
-	for _, x := range v {
-		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-			continue
-		}
-		a := x
-		if a < 0 {
-			a = -a
-		}
-		if a > maxAbs {
-			maxAbs = a
-		}
-	}
-	// Layout: 4-byte little-endian scale (float32) + dim * int8.
-	// Scale=0 means "all-zero vector"; decoder still returns zeros.
-	buf := make([]byte, 4+len(v))
-	if maxAbs == 0 {
-		return buf
-	}
-	scale := maxAbs / 127.0
-	binary.LittleEndian.PutUint32(buf[:4], math.Float32bits(scale))
-	for i, x := range v {
-		q := int32(math.Round(float64(x) / float64(scale)))
-		if q > 127 {
-			q = 127
-		} else if q < -128 {
-			q = -128
-		}
-		// q is clamped to [-128, 127] above, so the int8 conversion is
-		// safe. gosec's G115 cannot see the clamp.
-		buf[4+i] = byte(int8(q)) //nolint:gosec // G115: q is clamped to int8 range above
-	}
-	return buf
-}
-
-// DequantizeInt8 reverses QuantizeInt8. Returns an empty slice on
-// malformed input (length < 4 + 1). Preserved in this package so the
-// index layer (QUEST-209) picks up the inverse without a cross-package
-// import.
-func DequantizeInt8(blob []byte) []float32 {
-	if len(blob) < 4 {
-		return nil
-	}
-	scale := math.Float32frombits(binary.LittleEndian.Uint32(blob[:4]))
-	dim := len(blob) - 4
-	out := make([]float32, dim)
-	if scale == 0 {
-		return out
-	}
-	for i := 0; i < dim; i++ {
-		out[i] = float32(int8(blob[4+i])) * scale
-	}
-	return out
-}
+// Quantization lives in cosine.go alongside the cosine kernel. See
+// Quantize / Dequantize / VecDim there. This package-local comment stays
+// as a pointer so anyone grepping for "QuantizeInt8" in backfill lands
+// here and knows where the canonical helper moved.
 
 // renderProgressLine writes one "[pp%] done/total (elapsed)" line.
 // Kept deliberately plain (no ANSI) so the output is readable in the
