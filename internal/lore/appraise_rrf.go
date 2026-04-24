@@ -154,18 +154,23 @@ func appraiseRRF(
 	return out, true, nil
 }
 
-// appraiseCrossProject is the cross-project RRF fan-out path. It
-// runs one per-project appraisal per ADR-003 "Cross-project search",
-// producing one ranked list per project (each independently gated on
-// that project's own coverage and embedder_state), then RRF-merges
-// the per-project lists into a single union ordering.
+// appraiseCrossProject is the cross-project RRF path. It runs a global
+// BM25 query across all projects and a global vector TopK, then fuses
+// those two arms via Reciprocal Rank Fusion. The result is the true
+// globally top-N entries: if one project genuinely dominates for the
+// query, all N slots may come from that project.
 //
-// The query vector is encoded once up front and reused across every
-// per-project Index.TopK call to amortize the encode cost.
+// The previous design ran one per-project BM25+vector pair and then
+// merged the per-project lists via FuseMany. That emergent architecture
+// enforced roughly one result per project in the final top-N because
+// every project's rank-1 entry received an equal RRF score regardless of
+// how many matching entries that project had. The observation in LORE-374
+// / LORE-371 (guild-shaped query returned zero guild entries across
+// five spike projects) was the symptom.
 //
-// handled=false is returned only when the embedder is flat-out
-// disabled at the meta level; any other branch runs the per-project
-// fan-out and returns handled=true with the merged output.
+// handled=false is returned only when the embedder is flat-out disabled
+// at the meta level; any other branch runs the global fusion and returns
+// handled=true.
 func appraiseCrossProject(
 	ctx context.Context,
 	db *sql.DB,
@@ -187,12 +192,10 @@ func appraiseCrossProject(
 		logger = slog.Default()
 	}
 
-	// Keep the index fresh even on the cross-project path. A failure
-	// here is not fatal: we log and fall back to the BM25-only path,
-	// matching the single-project RRF arm's policy. QUEST-219:
-	// without this, cross-process vector writes made by `guild init`
-	// or an embed-rebuild from another MCP server are invisible to
-	// any all_projects=true appraise until the server restarts.
+	// Keep the index fresh. A failure here is not fatal: log and fall
+	// back to the BM25-only path, matching the single-project arm's
+	// policy. QUEST-219: without this, cross-process vector writes from
+	// `guild init` or an embed-rebuild are invisible until server restart.
 	if params.Embed.Index != nil {
 		if _, err := params.Embed.Index.CheckAndReload(ctx, db); err != nil {
 			logger.Warn("lore: appraise (all_projects): index CheckAndReload failed; falling back",
@@ -202,8 +205,7 @@ func appraiseCrossProject(
 		}
 	}
 
-	// Encode once. The per-project Index.TopK calls share the same
-	// int8 qvec.
+	// Encode once for the global vector arm.
 	fvec, err := params.Embed.Embedder.Embed(ctx, params.Query)
 	if err != nil {
 		logger.Warn("lore: appraise (all_projects): query embed failed; falling back",
@@ -216,63 +218,35 @@ func appraiseCrossProject(
 		return nil, false, nil
 	}
 
-	projects := params.ProjectIDs
-	if len(projects) == 0 {
-		projects, err = listProjects(ctx, db)
-		if err != nil {
-			return nil, false, fmt.Errorf("lore: appraise (all_projects): list projects: %w", err)
-		}
+	// Global BM25 arm: params.AllProjects=true causes buildWhereClause
+	// to omit the project_id filter, so this returns the globally
+	// ranked BM25 top-K across every project.
+	bm25Ids, err := runBM25TopN(ctx, db, params, now, RRFTopK)
+	if err != nil {
+		return nil, false, fmt.Errorf("lore: appraise (all_projects): bm25 arm: %w", err)
 	}
 
-	lists := make([]embed.Ranked, 0, len(projects))
-	for _, pid := range projects {
-		// Per-project BM25 arm: scoped by project_id via the existing
-		// WHERE-clause builder.
-		perParams := *params
-		perParams.AllProjects = false
-		perParams.Project = pid
-		bm25Ids, err := runBM25TopN(ctx, db, &perParams, now, RRFTopK)
-		if err != nil {
-			return nil, false, fmt.Errorf("lore: appraise (all_projects): project %q bm25: %w", pid, err)
-		}
-
-		// Per-project vector arm. Today each MCP server holds ONE
-		// index bound to the active project; cross-project indexing
-		// is not yet wired (scheduled for a later quest). Use the
-		// injected index only when it matches pid (when pid is the
-		// index's bound project); otherwise the vector arm is empty
-		// for this project and RRF falls back to BM25-only for it.
-		var vecIds embed.Ranked
-		if params.Embed.Index != nil {
-			// Caller wired exactly one Index. Without a project
-			// binding on the Index we cannot safely cross-apply it.
-			// Merge the vector arm only when the index is the single
-			// right one; otherwise behave as if no vectors for this
-			// project. Future (QUEST-213+) wires a per-project index
-			// map and replaces this heuristic.
-			scored, topErr := params.Embed.Index.TopK(qvec, RRFTopK)
-			if topErr == nil {
-				vecIds = make(embed.Ranked, 0, len(scored))
-				for _, s := range scored {
-					// Only include ids that belong to pid (cheap
-					// filter; rare false positives on shared ids
-					// across projects which cannot happen in this
-					// schema because lore_entries.id is globally
-					// unique per DB).
-					vecIds = append(vecIds, s.EntryID)
-				}
+	// Global vector arm. The shared index holds vectors from the active
+	// project; cross-project indexing lands in a later quest. Use it
+	// without project-scoping: lore_entries.id is globally unique in
+	// this DB so there are no false-positive cross-project id collisions.
+	var vecIds embed.Ranked
+	if params.Embed.Index != nil {
+		scored, topErr := params.Embed.Index.TopK(qvec, RRFTopK)
+		if topErr == nil {
+			vecIds = make(embed.Ranked, 0, len(scored))
+			for _, s := range scored {
+				vecIds = append(vecIds, s.EntryID)
 			}
 		}
-
-		lists = append(lists, embed.Fuse(embed.Ranked(bm25Ids), vecIds, limit*appraiseOverfetch))
 	}
 
-	merged := embed.FuseMany(lists, limit*appraiseOverfetch)
-	if len(merged) == 0 {
+	fused := embed.Fuse(embed.Ranked(bm25Ids), vecIds, limit*appraiseOverfetch)
+	if len(fused) == 0 {
 		return &AppraiseOutput{Results: []AppraiseResult{}}, true, nil
 	}
 
-	results, err := hydrateRankedEntries(ctx, db, params, now, scoring, merged)
+	results, err := hydrateRankedEntries(ctx, db, params, now, scoring, fused)
 	if err != nil {
 		return nil, false, err
 	}
@@ -340,28 +314,6 @@ func readMetaInt(ctx context.Context, db *sql.DB, key string) (int64, error) {
 		return 0, fmt.Errorf("lore: appraise: parse meta %q=%q: %w", key, s, err)
 	}
 	return n, nil
-}
-
-// listProjects returns every project id currently referenced by at
-// least one entry. Used by the cross-project RRF fan-out when the
-// caller did not pre-narrow via ProjectIDs.
-func listProjects(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx,
-		`SELECT DISTINCT project_id FROM entries ORDER BY project_id`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var pid string
-		if err := rows.Scan(&pid); err != nil {
-			return nil, err
-		}
-		out = append(out, pid)
-	}
-	return out, rows.Err()
 }
 
 // runBM25TopN is the ordinal-only BM25 ranker used as the lexical arm
