@@ -30,8 +30,10 @@ type InitOutcome struct {
 	// "ok", "unsupported_platform", "no_assets", "extract_failed",
 	// "embedder_init_failed", "probe_mismatch", "probe_error".
 	Reason string
-	// Identity is the manifest-bound identity written into meta on a
-	// successful enable. Zero-value on disabled outcomes.
+	// Identity is the manifest-bound identity. Populated whenever extract
+	// succeeds, even when probe subsequently fails (Option A: extract-time
+	// semantics). See WriteMeta for why these three fields are not gated on
+	// probe success.
 	Identity ManifestIdentity
 	// CacheDir is the extraction target (empty on skip).
 	CacheDir string
@@ -185,8 +187,15 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 		)
 		closeFn()
 		return nil, InitOutcome{
-			State:           "disabled",
-			Reason:          reason,
+			State:  "disabled",
+			Reason: reason,
+			// Identity is populated even on probe failure (Option A): model_id,
+			// tokenizer_hash, and runtime_version are deterministic digests of
+			// the bundled bytes, not attestations of probe success. Populating
+			// them on extract lets operators see the hash in `guild lore health`
+			// even when probe_mismatch fires, which is exactly when the hash is
+			// most useful for diagnosing asset drift (LORE-365 / LORE-369).
+			Identity:        man.Identity,
 			CacheDir:        ext.CacheDir,
 			Extracted:       ext.Extracted,
 			ExtractDuration: extractDur,
@@ -221,12 +230,29 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 }
 
 // WriteMeta upserts the embedder-identity meta rows from outcome into
-// db in one BEGIN IMMEDIATE transaction. Always writes state + reason;
-// only writes the identity rows when state="enabled". Safe to call for
-// both enabled and disabled outcomes; idempotent.
-func WriteMeta(ctx context.Context, db *sql.DB, outcome InitOutcome) error {
+// db in one BEGIN IMMEDIATE transaction.
+//
+// Write semantics (Option A, extract-time identity):
+//
+//   - embedder_state and embedder_state_reason are always written.
+//   - embedder_model_id, embedder_tokenizer_hash, and embedder_runtime_version
+//     are written whenever Identity.ModelID is non-empty, i.e. as soon as
+//     extract succeeds, regardless of whether probe passed or failed.
+//     These three fields are deterministic digests of the bundled bytes; their
+//     value is independent of probe outcome. Writing them on extract lets
+//     operators see the hash in `guild lore health` even during probe_mismatch,
+//     which is the most useful time to inspect it (LORE-365 / LORE-369).
+//   - embedder_dim is written only when state="enabled" because dim is an
+//     assertion about the running embedder, not merely a property of the files.
+//
+// The upsert is idempotent: re-running init with the same bundled vocab writes
+// the same hash (ON CONFLICT DO UPDATE SET value=excluded.value semantics).
+func WriteMeta(ctx context.Context, logger *slog.Logger, db *sql.DB, outcome InitOutcome) error {
 	if db == nil {
 		return fmt.Errorf("embed: WriteMeta: nil db")
+	}
+	if logger == nil {
+		logger = slog.Default()
 	}
 	conn, rollback, err := beginImmediateLocal(ctx, db, "write-meta")
 	if err != nil {
@@ -240,11 +266,26 @@ func WriteMeta(ctx context.Context, db *sql.DB, outcome InitOutcome) error {
 		{"embedder_state", outcome.State},
 		{"embedder_state_reason", outcome.Reason},
 	}
-	if outcome.State == "enabled" {
+	// Identity fields are extract-time values: populate whenever extract
+	// succeeded (signalled by a non-empty ModelID), probe success is not
+	// required. This makes tokenizer_hash visible in health output even when
+	// probe_mismatch fires, aiding drift diagnosis.
+	if outcome.Identity.ModelID != "" {
 		rows = append(rows,
 			struct{ k, v string }{"embedder_model_id", outcome.Identity.ModelID},
 			struct{ k, v string }{"embedder_tokenizer_hash", outcome.Identity.TokenizerHash},
 			struct{ k, v string }{"embedder_runtime_version", outcome.Identity.RuntimeVersion},
+		)
+		logger.Info("embedder meta: writing extract-time identity",
+			slog.String("model_id", outcome.Identity.ModelID),
+			slog.String("tokenizer_hash", outcome.Identity.TokenizerHash),
+			slog.String("runtime_version", outcome.Identity.RuntimeVersion),
+		)
+	}
+	// embedder_dim is an assertion about the running embedder; only write it
+	// when the embedder is fully validated (probe passed).
+	if outcome.State == "enabled" {
+		rows = append(rows,
 			struct{ k, v string }{"embedder_dim", strconv.Itoa(outcome.Identity.Dim)},
 		)
 	}
