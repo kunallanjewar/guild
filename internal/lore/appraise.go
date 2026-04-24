@@ -85,12 +85,18 @@ const defaultAppraiseLimit = 10
 const appraiseOverfetch = 3
 
 // ftsQuery converts a raw user query into a safe FTS5 expression.
-// Strips every non-word char (FTS5 reserves `-`, `"`, `*`, etc.), drops
-// tokens shorter than 2 characters, and returns an OR-of-prefixes.
+// Strips common English stopwords (see stopwords.go) before tokenizing,
+// then strips every non-word char (FTS5 reserves `-`, `"`, `*`, etc.),
+// drops tokens shorter than 2 characters, and returns an OR-of-prefixes.
+// Stopword stripping is applied before the length check so that a query
+// composed entirely of stopwords falls through to the original tokens
+// (via stripStopwords's no-op fallback), preserving exact-technical
+// query behavior.
 // Returns "" when no usable tokens survive, signalling the caller to
 // skip FTS entirely.
 func ftsQuery(userQuery string) string {
-	tokens := wordRE.FindAllString(strings.ToLower(userQuery), -1)
+	filtered := stripStopwords(userQuery)
+	tokens := wordRE.FindAllString(strings.ToLower(filtered), -1)
 	out := make([]string, 0, len(tokens))
 	for _, t := range tokens {
 		if len(t) < 2 {
