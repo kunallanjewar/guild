@@ -2,7 +2,7 @@
 
 # guild MCP tool catalog
 
-Every tool a registered MCP client sees. 41 tools.
+Every tool a registered MCP client sees. 42 tools.
 
 ## Tools
 
@@ -45,6 +45,7 @@ Every tool a registered MCP client sees. 41 tools.
 - [`quest_post`](#quest_post) — Create a quest another agent can accept without human follow-up — well-specced quest = no human follow-up needed to execute it.
 - [`quest_pulse`](#quest_pulse) — Rework rate, churn rate, hot files, untested quests.
 - [`quest_scroll`](#quest_scroll) — Full quest history: status, journal, timeline.
+- [`quest_search`](#quest_search) — BM25+stopwords full-text search over quest subjects and spec notes.
 - [`quest_summon`](#quest_summon) — Reassign a quest to a named teammate agent.
 - [`quest_update`](#quest_update) — Modify a quest's spec after post.
 
@@ -1373,6 +1374,39 @@ _no arguments_
   },
   "required": [
     "quest_id"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `quest_search`
+
+BM25+stopwords full-text search over quest subjects and spec notes. When quest vector coverage >= 90%, adds a semantic arm and RRF-fuses (k=60, same gate and fusion as lore_appraise). Returns up to 10 results. Replaces quest list --all | grep.
+
+_no arguments_
+
+<details><summary>Raw JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "limit": {
+      "description": "max results (default 10)",
+      "type": "integer"
+    },
+    "project": {
+      "type": "string"
+    },
+    "query": {
+      "description": "natural-language search query",
+      "type": "string"
+    }
+  },
+  "required": [
+    "query"
   ],
   "type": "object"
 }

@@ -67,6 +67,8 @@ var expectedTools = []struct {
 	{"lore_embed_rebuild"},
 	// Coverage denominator reconcile (QUEST-220 / LORE-373).
 	{"lore_coverage_reconcile"},
+	// Quest full-text + vector search (QUEST-224 / LORE-377).
+	{"quest_search"},
 }
 
 // isolateProject sets up a fresh $HOME, registers an active project,
@@ -737,6 +739,8 @@ func minArgsFor(name string) map[string]any {
 		return map[string]any{}
 	case "quest_update":
 		return map[string]any{"quest_id": "QUEST-1"}
+	case "quest_search":
+		return map[string]any{"query": "x"}
 	default:
 		return map[string]any{}
 	}
@@ -848,6 +852,8 @@ func smokeArgsFor(name string) map[string]any {
 			"quest_id": "QUEST-99999", "subject": "updated",
 			"project": "testproj",
 		}
+	case "quest_search":
+		return map[string]any{"query": "smoke search", "project": "testproj"}
 	default:
 		return base
 	}

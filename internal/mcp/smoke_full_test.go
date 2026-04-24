@@ -69,6 +69,7 @@ var toolArgSpecs = map[string][]command.ArgSpec{
 	"quest_pulse":    quest.PulseCommand.Args,
 	"quest_scroll":   quest.ScrollCommand.Args,
 	"quest_summon":   quest.SummonCommand.Args,
+	"quest_search":   quest.SearchCommand.Args,
 	"quest_update":   quest.UpdateCommand.Args,
 }
 

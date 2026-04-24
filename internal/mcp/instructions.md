@@ -248,6 +248,7 @@ Use these shapes when you need a concrete schema:
   quest_summon(quest_id="QUEST-7", to="other-agent")
   quest_orders(agent="other-agent")
   quest_guild()
+  quest_search(query="implement BM25 retrieval")
 
 ## What NOT to do
 

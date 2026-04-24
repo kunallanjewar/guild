@@ -59,6 +59,7 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild quest pulse`](#guild-quest-pulse) — quest quality dashboard: rework, churn, hot files
 - [`guild quest restore`](#guild-quest-restore) — restore quest state from .guild/snapshot.json
 - [`guild quest scroll`](#guild-quest-scroll) — full history: status + journal + timeline
+- [`guild quest search`](#guild-quest-search) — search quests by keyword or semantic paraphrase
 - [`guild quest summon`](#guild-quest-summon) — delegate a quest to a teammate agent
 - [`guild quest update`](#guild-quest-update) — modify a quest's spec after post
 - [`guild status`](#guild-status) — dashboard: last briefing, oath, top bounty, parallelism (alias of quest bounties)
@@ -1091,6 +1092,25 @@ Full quest history: status, journal, timeline. Use to pick up a quest someone el
 | flag | type | default | description |
 | --- | --- | --- | --- |
 | `--json` | bool | `false` | emit structured JSON result instead of formatted text |
+
+## `guild quest search`
+
+search quests by keyword or semantic paraphrase
+
+**Usage**
+
+```
+guild quest search QUERY... [flags]
+```
+
+BM25+stopwords full-text search over quest subjects and spec notes. When quest vector coverage >= 90%, adds a semantic arm and RRF-fuses (k=60, same gate and fusion as lore_appraise). Returns up to 10 results. Replaces quest list --all | grep.
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--json` | bool | `false` | emit structured JSON result instead of formatted text |
+| `--limit`, `-n` | int | `0` | max results (default 10) |
 
 ## `guild quest summon`
 

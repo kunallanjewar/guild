@@ -143,5 +143,6 @@ func registerAlwaysOn(s *sdkmcp.Server) {
 	quest.EpicCommand.BindMCP(s, mcpDeps)
 	quest.ActiveCommand.BindMCP(s, mcpDeps)
 	quest.ForfeitCommand.BindMCP(s, mcpDeps)
+	quest.SearchCommand.BindMCP(s, mcpDeps)
 	// archive/restore is CLI-only (QUEST-45) — see tools_guild.go comment.
 }
