@@ -108,7 +108,7 @@ func MaybeSkipProbe(ctx context.Context, db *sql.DB, man Manifest, logger *slog.
 		}
 	}
 
-	logger.Info("embedder warm-start, probe skipped",
+	logger.Debug("embedder warm-start, probe skipped",
 		slog.String("reason", "identity_match"),
 		slog.String("model_id", storedModelID),
 		slog.String("tokenizer_hash", storedTokenizerHash),
@@ -192,7 +192,7 @@ func WarmStartEmbedder(ctx context.Context, man Manifest, logger *slog.Logger) W
 	}
 
 	total := time.Since(start)
-	logger.Info("embedder warm-start complete",
+	logger.Debug("embedder warm-start complete",
 		slog.String("reason", "identity_match"),
 		slog.Int64("extract_duration_ms", extractDur.Milliseconds()),
 		slog.Int64("total_duration_ms", total.Milliseconds()),
