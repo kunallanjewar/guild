@@ -62,6 +62,9 @@ var expectedTools = []struct {
 	{"lore_echoes"},
 	{"lore_whispers"},
 	{"lore_ripples"},
+	// Embedder health tools (Phase 1.6 ADR-003, QUEST-211).
+	{"lore_health"},
+	{"lore_embed_rebuild"},
 }
 
 // isolateProject sets up a fresh $HOME, registers an active project,
@@ -782,6 +785,10 @@ func smokeArgsFor(name string) map[string]any {
 	case "lore_meld":
 		return base
 	case "lore_commune":
+		return base
+	case "lore_health":
+		return base
+	case "lore_embed_rebuild":
 		return base
 	case "lore_ripples":
 		return map[string]any{"entry_id": "999999", "project": "testproj"}
