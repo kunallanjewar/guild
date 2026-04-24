@@ -60,19 +60,19 @@ var CoverageReconcileCommand = &command.Command[CoverageReconcileInput, Coverage
 		defer func() { _ = db.Close() }()
 
 		// Read before state.
-		before, err := embed.ReadHealthReport(ctx, db)
+		before, err := embed.ReadHealthReport(ctx, db, embed.LoreCorpus{})
 		if err != nil {
 			return CoverageReconcileOutput{}, fmt.Errorf("lore: coverage-reconcile: read before state: %w", err)
 		}
 		denBefore := before.CoverageDen
 
 		// Run the reconcile.
-		if err := embed.ReconcileDen(ctx, db); err != nil {
+		if err := embed.ReconcileDen(ctx, db, embed.LoreCorpus{}); err != nil {
 			return CoverageReconcileOutput{}, fmt.Errorf("lore: coverage-reconcile: %w", err)
 		}
 
 		// Read after state.
-		after, err := embed.ReadHealthReport(ctx, db)
+		after, err := embed.ReadHealthReport(ctx, db, embed.LoreCorpus{})
 		if err != nil {
 			return CoverageReconcileOutput{}, fmt.Errorf("lore: coverage-reconcile: read after state: %w", err)
 		}

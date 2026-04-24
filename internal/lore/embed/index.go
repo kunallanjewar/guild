@@ -49,9 +49,9 @@ type ScoredEntry struct {
 }
 
 // Index is a per-process, in-memory vector index over a single
-// project's lore_vectors table. It holds parallel slices of int8
-// vectors and entry IDs plus a cached epoch; all access is guarded by
-// a single sync.RWMutex per ADR-003 invariant 3.
+// corpus's vector table. It holds parallel slices of int8 vectors and
+// entity IDs plus a cached epoch; all access is guarded by a single
+// sync.RWMutex per ADR-003 invariant 3.
 //
 // Lifecycle (caller's responsibility):
 //
@@ -64,10 +64,12 @@ type ScoredEntry struct {
 //     vector write, so the writer process does not pay a full reload.
 //  5. TopK for queries.
 //
-// Hexagonal boundary: Index knows about int8 BLOBs, entry IDs, and
+// Hexagonal boundary: Index knows about int8 BLOBs, entity IDs, and
 // epochs. It knows nothing about Embedder, query strings, RRF, or the
 // caller's concept of a "project." The caller owns the *sql.DB and
-// picks a bound model_id string at construction time.
+// picks a VectorCorpus adapter plus a bound model_id at construction
+// time; the adapter tells the Index which table, column, and meta key
+// to consult for this corpus.
 type Index struct {
 	// bindMu serializes full-index mutations (Load/Reload + Splice).
 	// A sync.RWMutex is sufficient for the production access pattern:
@@ -75,9 +77,16 @@ type Index struct {
 	// a low-rate writer path (one Splice per inscribe).
 	bindMu sync.RWMutex
 
+	// corpus names the tables, columns, and meta keys this index
+	// operates against. Set at construction and never mutated.
+	// Algorithms template SQL off the accessors; values originate in
+	// compile-time adapter code so fmt.Sprintf is safe here.
+	corpus VectorCorpus
+
 	// modelID is the canonical identity string this index trusts. Set
-	// at construction and never mutated. Rows whose lore_vectors.model_id
-	// disagrees with this value are skipped during LoadFromDB.
+	// at construction and never mutated. Rows whose vector table's
+	// model_id column disagrees with this value are skipped during
+	// LoadFromDB.
 	modelID string
 
 	// vectors is a tight []int8Vec slice; len(vectors[i]) == VecDim.
@@ -120,17 +129,23 @@ func WithLogger(l *slog.Logger) Option {
 	return func(i *Index) { i.logger = l }
 }
 
-// NewIndex constructs an empty Index bound to the given model_id. The
-// returned index is valid but reports loaded=false until LoadFromDB
-// runs; TopK against an unloaded index returns ErrIndexStale.
+// NewIndex constructs an empty Index bound to the given corpus and
+// model_id. The returned index is valid but reports loaded=false
+// until LoadFromDB runs; TopK against an unloaded index returns
+// ErrIndexStale.
+//
+// corpus names the tables and meta keys the index operates against.
+// LoreCorpus{} is the lore adapter; future corpora plug in without
+// any change to this constructor.
 //
 // modelID must equal the binary's embedded manifest identity (see
 // ADR-003 "Vector versioning"). At the time of writing, the canonical
 // value is "bge-small-en-v1.5-int8-cls"; pass the string from the
 // caller rather than hard-coding it here so the index remains
 // decoupled from the model lifecycle.
-func NewIndex(modelID string, opts ...Option) *Index {
+func NewIndex(corpus VectorCorpus, modelID string, opts ...Option) *Index {
 	idx := &Index{
+		corpus:  corpus,
 		modelID: modelID,
 		byEntry: make(map[int64]int),
 	}
@@ -184,14 +199,19 @@ func (i *Index) LoadFromDB(ctx context.Context, db *sql.DB) (int, error) {
 	if db == nil {
 		return 0, errors.New("embed/index: LoadFromDB: nil *sql.DB")
 	}
+	if i.corpus == nil {
+		return 0, errors.New("embed/index: LoadFromDB: nil corpus")
+	}
 
 	// Read the canonical model_id from meta first. If it disagrees
 	// with the bound model_id, the whole corpus is mismatched and
 	// the caller needs to know; return ErrModelMismatch without
-	// clobbering the existing index.
+	// clobbering the existing index. The meta key is resolved via
+	// the corpus adapter so a non-lore corpus looks up its own row.
 	var metaModelID string
 	err := db.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key = 'embedder_model_id'`,
+		`SELECT value FROM meta WHERE key = ?`,
+		i.corpus.MetaKey(FieldEmbedderModelID),
 	).Scan(&metaModelID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -203,6 +223,7 @@ func (i *Index) LoadFromDB(ctx context.Context, db *sql.DB) (int, error) {
 	default:
 		if metaModelID != i.modelID {
 			i.logger.Warn("embed/index: model identity mismatch; refusing load",
+				"corpus", i.corpus.Name(),
 				"bound_model_id", i.modelID,
 				"meta_model_id", metaModelID,
 			)
@@ -210,17 +231,19 @@ func (i *Index) LoadFromDB(ctx context.Context, db *sql.DB) (int, error) {
 		}
 	}
 
-	// Stream lore_vectors in one SELECT. entry_id is the PK so the
-	// default ordering is by id; that is fine for parallel-slice
-	// layout and gives tests a deterministic load order.
-	rows, err := db.QueryContext(ctx, `
-		SELECT entry_id, vec
-		FROM   lore_vectors
-		WHERE  model_id = ?
-		ORDER  BY entry_id
-	`, i.modelID)
+	// Stream the corpus's vector table in one SELECT. entry_id is the
+	// PK so the default ordering is by id; that is fine for parallel-
+	// slice layout and gives tests a deterministic load order.
+	//
+	// fmt.Sprintf is safe here: the table name originates in compile-
+	// time adapter code (LoreCorpus{}.VectorTable returns a literal),
+	// never from user input. Query parameters still flow through the
+	// driver's placeholder substitution. gosec G201 fires on any SQL
+	// Sprintf so we suppress it locally.
+	query := fmt.Sprintf(`SELECT entry_id, vec FROM %s WHERE model_id = ? ORDER BY entry_id`, i.corpus.VectorTable()) //nolint:gosec // G201: table name is a compile-time constant from the corpus adapter, not user input.
+	rows, err := db.QueryContext(ctx, query, i.modelID)                                                               //nolint:sqlcheck // query templated from compile-time corpus.VectorTable(), not user input; ? placeholders preserved.
 	if err != nil {
-		return 0, fmt.Errorf("embed/index: SELECT lore_vectors: %w", err)
+		return 0, fmt.Errorf("embed/index: SELECT %s: %w", i.corpus.VectorTable(), err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -264,11 +287,12 @@ func (i *Index) LoadFromDB(ctx context.Context, db *sql.DB) (int, error) {
 		newByID[id] = slot
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("embed/index: iterate lore_vectors: %w", err)
+		return 0, fmt.Errorf("embed/index: iterate %s: %w", i.corpus.VectorTable(), err)
 	}
 
-	// Refresh epoch from meta. A missing row (fresh DB) yields 0.
-	epoch, err := readEpoch(ctx, db)
+	// Refresh epoch from meta using the corpus's meta key. A missing
+	// row (fresh DB) yields 0.
+	epoch, err := readEpoch(ctx, db, i.corpus.MetaKey(FieldVectorEpoch))
 	if err != nil {
 		return 0, err
 	}
@@ -303,8 +327,11 @@ func (i *Index) CheckAndReload(ctx context.Context, db *sql.DB) (bool, error) {
 	if db == nil {
 		return false, errors.New("embed/index: CheckAndReload: nil *sql.DB")
 	}
+	if i.corpus == nil {
+		return false, errors.New("embed/index: CheckAndReload: nil corpus")
+	}
 
-	epoch, err := readEpoch(ctx, db)
+	epoch, err := readEpoch(ctx, db, i.corpus.MetaKey(FieldVectorEpoch))
 	if err != nil {
 		return false, err
 	}
@@ -433,24 +460,27 @@ func (i *Index) TopK(qvec []int8, k int) ([]ScoredEntry, error) {
 	return scores[:k], nil
 }
 
-// readEpoch fetches meta.vector_epoch as an int64. A missing row
-// yields zero, matching the seed value in migration 003. Parse
-// errors are returned so callers see a corrupt meta row instead of
-// silently treating it as zero.
-func readEpoch(ctx context.Context, db *sql.DB) (int64, error) {
+// readEpoch fetches the corpus's vector_epoch meta value as an int64.
+// A missing row yields zero, matching the seed value in migration
+// 003. Parse errors are returned so callers see a corrupt meta row
+// instead of silently treating it as zero.
+//
+// key is the corpus-resolved meta key (LoreCorpus uses 'vector_epoch';
+// future corpora may use 'quest.vector_epoch' etc.).
+func readEpoch(ctx context.Context, db *sql.DB, key string) (int64, error) {
 	var s string
 	err := db.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key = 'vector_epoch'`,
+		`SELECT value FROM meta WHERE key = ?`, key,
 	).Scan(&s)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, nil
 	case err != nil:
-		return 0, fmt.Errorf("embed/index: read meta vector_epoch: %w", err)
+		return 0, fmt.Errorf("embed/index: read meta %s: %w", key, err)
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("embed/index: parse meta vector_epoch %q: %w", s, err)
+		return 0, fmt.Errorf("embed/index: parse meta %s %q: %w", key, s, err)
 	}
 	return n, nil
 }

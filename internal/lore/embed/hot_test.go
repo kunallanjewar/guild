@@ -209,7 +209,7 @@ func TestWriteVector_SplicesIntoIndex(t *testing.T) {
 	db, entryID := hotTestDB(t)
 
 	const modelID = "bge-small-en-v1.5-int8-cls"
-	idx := NewIndex(modelID)
+	idx := NewIndex(LoreCorpus{}, modelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("initial load: %v", err)
 	}

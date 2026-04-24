@@ -23,7 +23,7 @@ const canonModelID = "bge-small-en-v1.5-int8-cls"
 // constructed Index returns ErrIndexStale; callers are expected to
 // LoadFromDB at startup and only query after load.
 func TestIndex_EmptyIndex_TopKReturnsStale(t *testing.T) {
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	q := make([]int8, VecDim)
 	_, err := idx.TopK(q, 10)
 	if !errors.Is(err, ErrIndexStale) {
@@ -34,7 +34,7 @@ func TestIndex_EmptyIndex_TopKReturnsStale(t *testing.T) {
 // TestIndex_TopK_WrongQueryShapeIsTypedError: guards against callers
 // passing a truncated query vector.
 func TestIndex_TopK_WrongQueryShapeIsTypedError(t *testing.T) {
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	_, err := idx.TopK(make([]int8, VecDim-1), 10)
 	if !errors.Is(err, ErrQueryShape) {
 		t.Fatalf("got %v, want ErrQueryShape", err)
@@ -51,7 +51,7 @@ func TestIndex_TopK_WrongQueryShapeIsTypedError(t *testing.T) {
 func TestIndex_LoadFromDB_EmptyTableOK(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	n, err := idx.LoadFromDB(ctx, db)
 	if err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
@@ -87,7 +87,7 @@ func TestIndex_LoadFromDB_ReadsMatchingModelOnly(t *testing.T) {
 	mustInsertVec(t, db, 2, canonModelID, Quantize(deterministicUnitVec(101)))
 	mustInsertVec(t, db, 3, "bge-small-v1-old", Quantize(deterministicUnitVec(102)))
 
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	n, err := idx.LoadFromDB(ctx, db)
 	if err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
@@ -107,7 +107,7 @@ func TestIndex_LoadFromDB_ReadsMatchingModelOnly(t *testing.T) {
 func TestIndex_LoadFromDB_ModelIdentityMismatch(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex("some-other-model")
+	idx := NewIndex(LoreCorpus{}, "some-other-model")
 	_, err := idx.LoadFromDB(ctx, db)
 	if !errors.Is(err, ErrModelMismatch) {
 		t.Fatalf("got %v, want ErrModelMismatch", err)
@@ -130,7 +130,7 @@ func TestIndex_LoadFromDB_SkipsMalformedRows(t *testing.T) {
 	mustInsertVec(t, db, 2, canonModelID, make([]int8, 128)) // wrong length
 	mustInsertVec(t, db, 3, canonModelID, Quantize(deterministicUnitVec(2)))
 
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	n, err := idx.LoadFromDB(ctx, db)
 	if err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
@@ -156,7 +156,7 @@ func TestIndex_TopK_RanksExactMatchFirst(t *testing.T) {
 		mustInsertVec(t, db, int64(i+1), canonModelID, refs[i])
 	}
 
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestIndex_TopK_KLargerThanCorpus(t *testing.T) {
 	db := openEmbedTestDB(t)
 	mustSeedEntry(t, db, 1, "e1")
 	mustInsertVec(t, db, 1, canonModelID, Quantize(deterministicUnitVec(1)))
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestIndex_TopK_ZeroK(t *testing.T) {
 	db := openEmbedTestDB(t)
 	mustSeedEntry(t, db, 1, "e1")
 	mustInsertVec(t, db, 1, canonModelID, Quantize(deterministicUnitVec(1)))
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestIndex_TopK_DeterministicTiebreak(t *testing.T) {
 	mustInsertVec(t, db, 7, canonModelID, v)
 	mustInsertVec(t, db, 3, canonModelID, v)
 
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestIndex_CheckAndReload_NoOpWhenEpochUnchanged(t *testing.T) {
 	// Seed epoch to some non-zero value so cachedEpoch == DB value.
 	mustSetEpoch(t, db, 42)
 
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestIndex_CheckAndReload_ReloadsOnEpochBump(t *testing.T) {
 	mustInsertVec(t, db, 1, canonModelID, Quantize(deterministicUnitVec(1)))
 	mustSetEpoch(t, db, 1)
 
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestIndex_CheckAndReload_ReloadsOnEpochBump(t *testing.T) {
 func TestIndex_Splice_InsertNew(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestIndex_Splice_InsertNew(t *testing.T) {
 func TestIndex_Splice_ReplaceExisting(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestIndex_Splice_ReplaceExisting(t *testing.T) {
 func TestIndex_Splice_WrongLength(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestIndex_Splice_WrongLength(t *testing.T) {
 func TestIndex_Splice_EpochRegress(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestIndex_Splice_EpochRegress(t *testing.T) {
 func TestIndex_Splice_DefensiveCopy(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestIndex_Splice_DefensiveCopy(t *testing.T) {
 func TestIndex_ConcurrentReadsAndSplice(t *testing.T) {
 	ctx := context.Background()
 	db := openEmbedTestDB(t)
-	idx := NewIndex(canonModelID)
+	idx := NewIndex(LoreCorpus{}, canonModelID)
 	if _, err := idx.LoadFromDB(ctx, db); err != nil {
 		t.Fatalf("LoadFromDB: %v", err)
 	}

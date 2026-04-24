@@ -199,7 +199,7 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 		// Read the embedder health line. Failures are swallowed: a missing
 		// meta table (pre-migration DB) must not break session-start.
 		// Only non-healthy states emit a line; healthy state returns "".
-		if report, hErr := embed.ReadHealthReport(ctx, loreDB); hErr == nil {
+		if report, hErr := embed.ReadHealthReport(ctx, loreDB, embed.LoreCorpus{}); hErr == nil {
 			embedderHealthLine = report.SessionLine()
 		}
 	}
