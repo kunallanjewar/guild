@@ -45,7 +45,9 @@ var ReforgeCommand = &command.Command[ReforgeInput, ReforgeOutput]{
 		if _, err := d.ResolveProj(ctx, in.Project); err != nil {
 			return ReforgeOutput{}, err
 		}
-		if err := Reforge(ctx, db, oldID, newID, time.Time{}); err != nil {
+		// QUEST-210/211 will wire d.EmbedDeps; until then we pass nil
+		// and Reforge behaves exactly like the pre-Phase-1 path.
+		if err := Reforge(ctx, db, oldID, newID, time.Time{}, nil); err != nil {
 			return ReforgeOutput{}, err
 		}
 		return ReforgeOutput{OldID: oldID, NewID: newID}, nil
