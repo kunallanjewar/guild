@@ -17,7 +17,7 @@ func newBGEEmbedderFromExt(ext *ExtractResult) (Embedder, func(), error) {
 	// scheduling as a source of float32 accumulation-order drift. The
 	// reference fixture was captured single-threaded; mismatching that
 	// reintroduces the cross-machine noise QUEST-215 was filed to kill.
-	// Backfill and real inference do not share this handle — they go
+	// Backfill and real inference do not share this handle; they go
 	// through embed_wiring.go which constructs its own embedder with the
 	// production thread count.
 	emb, err := NewBGEEmbedder(RuntimeConfig{

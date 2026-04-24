@@ -175,7 +175,7 @@ func TestProbe_AdversarialRejectsUnrelated(t *testing.T) {
 		}
 		sim := cosineSimilarity(v, ref)
 		if sim >= adversarialCeiling {
-			t.Errorf("adversarial cosine for %q: %.6f (want < %.6f) — probe reference does not discriminate",
+			t.Errorf("adversarial cosine for %q: %.6f (want < %.6f); probe reference does not discriminate",
 				text, sim, adversarialCeiling)
 		} else {
 			t.Logf("adversarial %q: cosine=%.6f", text, sim)
