@@ -179,11 +179,7 @@ func restoreV1(ctx context.Context, db *sql.DB, projectID string, data []byte) (
 		// because restore is a single-writer operation; concurrent
 		// restore against the same project is not a supported mode.
 		if status != string(StatusArchived) && status != string(StatusParked) {
-			if _, err := db.ExecContext(ctx, `
-				UPDATE meta
-				   SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
-				 WHERE key = 'vector_coverage_den'
-			`); err != nil {
+			if _, err := db.ExecContext(ctx, sqlBumpCoverageDen); err != nil {
 				return nil, fmt.Errorf("lore: restore v1: bump vector_coverage_den: %w", err)
 			}
 		}
