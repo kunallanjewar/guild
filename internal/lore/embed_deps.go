@@ -122,6 +122,7 @@ func (d *EmbedDeps) hotDeps() embed.HotDeps {
 	return embed.HotDeps{
 		Embedder: d.Embedder,
 		Index:    d.Index,
+		Corpus:   embed.LoreCorpus{},
 		ModelID:  d.ModelID,
 		Logger:   d.Logger,
 	}
