@@ -484,7 +484,7 @@ func runEmbedderInit(ctx context.Context, loreDB *sql.DB, out io.Writer) {
 	if prep != nil {
 		defer prep.Close()
 	}
-	if werr := embed.WriteMeta(ctx, loreDB, outcome); werr != nil {
+	if werr := embed.WriteMeta(ctx, logger, loreDB, outcome); werr != nil {
 		fmt.Fprintf(out, "  [!] embedder write-meta failed: %s\n", werr)
 		return
 	}
