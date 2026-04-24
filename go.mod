@@ -7,6 +7,7 @@ require (
 	github.com/google/jsonschema-go v0.4.2
 	github.com/mattn/go-isatty v0.0.21
 	github.com/modelcontextprotocol/go-sdk v1.5.0
+	github.com/shota3506/onnxruntime-purego v0.0.0-20260315223538-8db8bd7424b2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	golang.org/x/tools v0.44.0
@@ -15,6 +16,7 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/ebitengine/purego v0.9.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
