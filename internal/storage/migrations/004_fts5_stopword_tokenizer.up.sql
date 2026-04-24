@@ -1,4 +1,4 @@
--- 003_fts5_stopword_tokenizer.up.sql
+-- 004_fts5_stopword_tokenizer.up.sql
 --
 -- Phase 0 of ADR-003: upgrade the lore FTS5 index tokenizer from the
 -- default unicode61 to porter+unicode61 with diacritics removed. Porter
