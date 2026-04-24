@@ -23,6 +23,11 @@ func Register(s *sdkmcp.Server) {
 	// trap captured in LORE-371). Each test-spawned server gets its
 	// own provider.
 	currentEmbedProvider = newEmbedProvider(openLoreDB, newLogger())
+	// Reset the auto-backfill once-guard so each server rebuild sees a
+	// fresh trigger. The provider's first post-reset resolve that wires
+	// a live *EmbedDeps fires the per-corpus backfill goroutines.
+	// QUEST-229 / LORE-384.
+	resetAutoBackfillState()
 	registerBootstrap(s)
 	registerAlwaysOn(s)
 }
