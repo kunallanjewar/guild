@@ -162,7 +162,7 @@ func runAppraise(cmd *cobra.Command, args []string, f appraiseFlags) error {
 	// the CLI surface is short-lived; the Appraise RRF path embeds
 	// the query live and runs SQL TopK. Nil is fine: handler falls
 	// back to BM25+stopwords per ADR-003.
-	embedDeps, _, _ := lore.WireEmbedDeps(ctx, db, lore.EmbedWireOptions{Async: false, LoadIndex: false})
+	embedDeps, _, _ := lore.WireEmbedDeps(ctx, db, lore.EmbedWireOptions{Async: false, LoadIndex: false, Logger: newCLILogger()})
 	out, err := lore.Appraise(ctx, db, lore.AppraiseParams{
 		Query:       query,
 		Limit:       f.Limit,
@@ -524,6 +524,7 @@ func wireCLIEmbedDeps() *lore.EmbedDeps {
 	deps, _, _ := lore.WireEmbedDeps(ctx, db, lore.EmbedWireOptions{
 		Async:     false,
 		LoadIndex: false,
+		Logger:    newCLILogger(),
 	})
 	return deps
 }
