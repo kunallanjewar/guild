@@ -23,14 +23,10 @@ import (
 // direct edits to instructions.md do. See QUEST-57 for the dynamic
 // build path and its separate tests.
 //
-// Last updated for QUEST-190: broader vocabulary audit — universalize
-// four dev-coded phrases so the MCP contract is project-type-agnostic:
-// (1) Rule 5 report guidance: "commit hash, files" → "what changed, what
-// remains"; (2) Rule 11: "grep" → "a search", "index files" → "index
-// project content"; (3) lore-summaries paragraph: "Implementation detail
-// goes in" → "Detail goes in"; (4) transfer-reasoning heading: "carry
-// implementation detail" → "carry the detail".
-const wantStaticSHA = "5c95845f84d8a56de82638073cf49af183ba6853a7692f0f0666c36e9421afec"
+// Last updated for QUEST-224: added quest_search(query=...) to the
+// canonical invocation examples section so doc-coverage passes for the
+// new BM25+vector quest search tool (LORE-377).
+const wantStaticSHA = "a16af9601ed3e17e2aeff07dad7e3b39a94c7a4dc149443ffcd3a619e1c9b396"
 
 func TestStaticInstructions_Embedded(t *testing.T) {
 	if staticInstructions == "" {
