@@ -22,6 +22,21 @@ import (
 )
 
 // InitOutcome summarizes the embedder bring-up for logging + meta.
+//
+// Structured slog field names (stable; do not rename without a LORE decision):
+//
+//	extract_duration_ms_dylib  - libonnxruntime dylib / .so wall-clock ms
+//	extract_duration_ms_model  - model.onnx wall-clock ms
+//	extract_duration_ms_vocab  - vocab.txt wall-clock ms
+//	extract_duration_ms_total  - total extract wall-clock ms
+//	probe_duration_ms          - probe wall-clock ms
+//	probe_cosine_observed      - observed cosine similarity (float64)
+//	probe_cosine_floor         - acceptance floor (ProbeMinCosine)
+//	extracted_dylib_sha256     - full hex SHA-256 of the extracted dylib
+//	extracted_model_sha256     - full hex SHA-256 of the extracted model.onnx
+//	extracted_vocab_sha256     - full hex SHA-256 of the extracted vocab.txt
+//	model_id                   - canonical model identifier
+//	tokenizer_hash             - digest of the vocab file
 type InitOutcome struct {
 	// State is the meta.embedder_state value the caller should write:
 	// "enabled" when the probe passed, "disabled" otherwise.
@@ -40,12 +55,28 @@ type InitOutcome struct {
 	// Extracted is true when Extract wrote bytes this call.
 	Extracted bool
 	// ProbeCosine is the cosine similarity against the pinned
-	// reference (0 on skipped probe).
+	// reference (0 on skipped probe). Slog field: probe_cosine_observed.
 	ProbeCosine float64
-	// ExtractDuration + ProbeDuration are reported for the init
-	// transcript. Zero on skipped paths.
+	// ProbeFloor is the acceptance threshold used by the probe.
+	// Slog field: probe_cosine_floor.
+	ProbeFloor float64
+	// ExtractDuration is total wall-clock time for all three asset
+	// extract calls. Slog field: extract_duration_ms_total.
 	ExtractDuration time.Duration
-	ProbeDuration   time.Duration
+	// ProbeDuration is the probe wall-clock time. Slog field: probe_duration_ms.
+	ProbeDuration time.Duration
+	// Per-asset extract durations (LORE-368). Zero when extraction was
+	// skipped (no assets). Slog fields: extract_duration_ms_dylib,
+	// extract_duration_ms_model, extract_duration_ms_vocab.
+	DylibExtractDuration time.Duration
+	ModelExtractDuration time.Duration
+	VocabExtractDuration time.Duration
+	// Asset SHA-256 digests from the manifest (full hex). Present whenever
+	// extract succeeds. Slog fields: extracted_dylib_sha256,
+	// extracted_model_sha256, extracted_vocab_sha256.
+	DylibSHA256 string
+	ModelSHA256 string
+	VocabSHA256 string
 	// Err is the outer error surfaced to the caller for logging. The
 	// caller should still persist State="disabled" in meta; guild init
 	// never exits non-zero just because the embedder is off.
@@ -114,30 +145,40 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 		}
 	}
 
-	startExtract := time.Now()
 	ext, err := Extract(man, cacheDir)
-	extractDur := time.Since(startExtract)
 	if err != nil {
 		logger.Warn("embedder disabled: extract failed",
 			slog.String("cache_dir", cacheDir),
 			slog.String("err", err.Error()),
-			slog.Duration("extract_duration", extractDur),
 		)
 		return nil, InitOutcome{
-			State:           "disabled",
-			Reason:          "extract_failed",
-			CacheDir:        cacheDir,
-			ExtractDuration: extractDur,
-			Err:             err,
+			State:    "disabled",
+			Reason:   "extract_failed",
+			CacheDir: cacheDir,
+			Err:      err,
 		}
 	}
+
+	// Capture per-asset and total durations from ExtractResult (LORE-368).
+	dylibDur := ext.DylibDuration
+	modelDur := ext.ModelDuration
+	vocabDur := ext.VocabDuration
+	extractDur := ext.TotalDuration
+	dylibSHA := man.Assets[AssetLibrary].SHA256
+	modelSHA := man.Assets[AssetModel].SHA256
+	vocabSHA := man.Assets[AssetVocab].SHA256
+
 	logger.Info("embedder assets extracted",
 		slog.String("cache_dir", ext.CacheDir),
 		slog.Bool("extracted", ext.Extracted),
 		slog.String("library_path", ext.LibraryPath),
-		slog.String("model_sha256", man.Assets[AssetModel].SHA256),
-		slog.String("library_sha256", man.Assets[AssetLibrary].SHA256),
-		slog.Duration("extract_duration", extractDur),
+		slog.Int64("extract_duration_ms_dylib", dylibDur.Milliseconds()),
+		slog.Int64("extract_duration_ms_model", modelDur.Milliseconds()),
+		slog.Int64("extract_duration_ms_vocab", vocabDur.Milliseconds()),
+		slog.Int64("extract_duration_ms_total", extractDur.Milliseconds()),
+		slog.String("extracted_dylib_sha256", dylibSHA),
+		slog.String("extracted_model_sha256", modelSHA),
+		slog.String("extracted_vocab_sha256", vocabSHA),
 	)
 
 	emb, closeFn, err := newBGEEmbedderFromExt(ext)
@@ -146,11 +187,18 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 			slog.String("err", err.Error()),
 		)
 		return nil, InitOutcome{
-			State:           "disabled",
-			Reason:          "embedder_init_failed",
-			CacheDir:        ext.CacheDir,
-			ExtractDuration: extractDur,
-			Err:             err,
+			State:                "disabled",
+			Reason:               "embedder_init_failed",
+			CacheDir:             ext.CacheDir,
+			Extracted:            ext.Extracted,
+			ExtractDuration:      extractDur,
+			DylibExtractDuration: dylibDur,
+			ModelExtractDuration: modelDur,
+			VocabExtractDuration: vocabDur,
+			DylibSHA256:          dylibSHA,
+			ModelSHA256:          modelSHA,
+			VocabSHA256:          vocabSHA,
+			Err:                  err,
 		}
 	}
 
@@ -164,23 +212,28 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 		if errors.Is(probe.Err, ErrProbeMismatch) {
 			reason = "probe_mismatch"
 		}
-		// Structured fingerprint on failure: the next operator reading
-		// logs can tell at a glance whether it is asset drift, tokenizer
-		// drift, or pure quantization noise without another round trip.
+		// Structured fingerprint on failure (LORE-368): the next operator
+		// reading logs can tell at a glance whether it is asset drift,
+		// tokenizer drift, or pure quantization noise without another round
+		// trip.
 		logger.Warn("embedder disabled: probe failed",
 			slog.String("reason", reason),
-			slog.Float64("cosine", probe.Cosine),
-			slog.Float64("floor", probe.Floor),
+			slog.Float64("probe_cosine_observed", probe.Cosine),
+			slog.Float64("probe_cosine_floor", probe.Floor),
 			slog.Int("dim", probe.Dim),
 			slog.String("err", probe.Err.Error()),
-			slog.Duration("probe_duration", probeDur),
+			slog.Int64("probe_duration_ms", probeDur.Milliseconds()),
+			slog.Int64("extract_duration_ms_dylib", dylibDur.Milliseconds()),
+			slog.Int64("extract_duration_ms_model", modelDur.Milliseconds()),
+			slog.Int64("extract_duration_ms_vocab", vocabDur.Milliseconds()),
+			slog.Int64("extract_duration_ms_total", extractDur.Milliseconds()),
 			slog.String("platform_tag", man.Identity.PlatformTag),
 			slog.String("model_id", man.Identity.ModelID),
 			slog.String("tokenizer_hash", man.Identity.TokenizerHash),
 			slog.String("runtime_version", man.Identity.RuntimeVersion),
-			slog.String("library_sha256", man.Assets[AssetLibrary].SHA256),
-			slog.String("model_sha256", man.Assets[AssetModel].SHA256),
-			slog.String("vocab_sha256", man.Assets[AssetVocab].SHA256),
+			slog.String("extracted_dylib_sha256", dylibSHA),
+			slog.String("extracted_model_sha256", modelSHA),
+			slog.String("extracted_vocab_sha256", vocabSHA),
 			slog.String("library_path", ext.LibraryPath),
 			slog.String("model_path", ext.ModelPath),
 			slog.String("vocab_path", ext.VocabPath),
@@ -195,20 +248,28 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 			// them on extract lets operators see the hash in `guild lore health`
 			// even when probe_mismatch fires, which is exactly when the hash is
 			// most useful for diagnosing asset drift (LORE-365 / LORE-369).
-			Identity:        man.Identity,
-			CacheDir:        ext.CacheDir,
-			Extracted:       ext.Extracted,
-			ExtractDuration: extractDur,
-			ProbeCosine:     probe.Cosine,
-			ProbeDuration:   probeDur,
-			Err:             probe.Err,
+			Identity:             man.Identity,
+			CacheDir:             ext.CacheDir,
+			Extracted:            ext.Extracted,
+			ExtractDuration:      extractDur,
+			DylibExtractDuration: dylibDur,
+			ModelExtractDuration: modelDur,
+			VocabExtractDuration: vocabDur,
+			ProbeCosine:          probe.Cosine,
+			ProbeFloor:           probe.Floor,
+			ProbeDuration:        probeDur,
+			DylibSHA256:          dylibSHA,
+			ModelSHA256:          modelSHA,
+			VocabSHA256:          vocabSHA,
+			Err:                  probe.Err,
 		}
 	}
 	logger.Info("embedder probe passed",
-		slog.Float64("cosine", probe.Cosine),
-		slog.Float64("floor", probe.Floor),
+		slog.Float64("probe_cosine_observed", probe.Cosine),
+		slog.Float64("probe_cosine_floor", probe.Floor),
 		slog.Int("dim", probe.Dim),
-		slog.Duration("probe_duration", probeDur),
+		slog.Int64("probe_duration_ms", probeDur.Milliseconds()),
+		slog.Int64("extract_duration_ms_total", extractDur.Milliseconds()),
 		slog.String("model_id", man.Identity.ModelID),
 		slog.String("tokenizer_hash", man.Identity.TokenizerHash),
 	)
@@ -218,14 +279,21 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 			close:    closeFn,
 		},
 		InitOutcome{
-			State:           "enabled",
-			Reason:          "ok",
-			Identity:        man.Identity,
-			CacheDir:        ext.CacheDir,
-			Extracted:       ext.Extracted,
-			ExtractDuration: extractDur,
-			ProbeCosine:     probe.Cosine,
-			ProbeDuration:   probeDur,
+			State:                "enabled",
+			Reason:               "ok",
+			Identity:             man.Identity,
+			CacheDir:             ext.CacheDir,
+			Extracted:            ext.Extracted,
+			ExtractDuration:      extractDur,
+			DylibExtractDuration: dylibDur,
+			ModelExtractDuration: modelDur,
+			VocabExtractDuration: vocabDur,
+			ProbeCosine:          probe.Cosine,
+			ProbeFloor:           probe.Floor,
+			ProbeDuration:        probeDur,
+			DylibSHA256:          dylibSHA,
+			ModelSHA256:          modelSHA,
+			VocabSHA256:          vocabSHA,
 		}
 }
 
