@@ -164,6 +164,7 @@ func init() {
 	bindRegistryVerb(questCmd, quest.ListCommand, deps, "quest list")
 	bindRegistryVerb(questCmd, quest.GuildCommand, deps, "quest guild")
 	bindRegistryVerb(questCmd, quest.PulseCommand, deps, "quest pulse")
+	bindRegistryVerb(questCmd, quest.SearchCommand, deps, "quest search")
 }
 
 // bindRegistryVerb attaches a Command registry spec to parent and wraps
