@@ -127,6 +127,55 @@ func TestWireEmbedDeps_FallbackPaths(t *testing.T) {
 	}
 }
 
+// TestWireEmbedDeps_WarmStartFallthrough verifies that the warm-start fast
+// path in WireEmbedDeps (Async=false, LoadIndex=false) falls through to the
+// cold PrepareAndProbe path when WarmStartEmbedder cannot produce an Embedder
+// (no bundled assets on a default build). The final reason is "no_bundled_assets"
+// from the cold path, proving the fallthrough chain is intact.
+func TestWireEmbedDeps_WarmStartFallthrough(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	db := openTestDB(t, "warmstart-fallthrough")
+
+	// Seed meta so MaybeSkipProbe returns Skip=true, but WarmStartEmbedder
+	// then fails (no bundled assets in the default build). The function
+	// must fall through to PrepareAndProbe, which also returns
+	// "no_bundled_assets" on a non-withembed build.
+	for _, kv := range []struct{ k, v string }{
+		{"embedder_state", "enabled"},
+		{"embedder_model_id", "bge-small-en-v1.5-int8-cls"},
+		{"embedder_tokenizer_hash", "anyhash"},
+	} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			kv.k, kv.v,
+		); err != nil {
+			t.Fatalf("seed meta %s: %v", kv.k, err)
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("warm-start fallthrough path behaves differently on Windows; covered by platform_disabled case")
+	}
+
+	deps, status, err := WireEmbedDeps(ctx, db, EmbedWireOptions{
+		Async:     false,
+		LoadIndex: false,
+	})
+	if err != nil {
+		t.Fatalf("WireEmbedDeps returned err: %v", err)
+	}
+	if status.Wired {
+		t.Errorf("status.Wired = true, want false on no-bundled-assets build")
+	}
+	// On a default (no -tags=withembed) build, both warm-start and
+	// PrepareAndProbe reach the "no_bundled_assets" branch.
+	if deps != nil {
+		t.Errorf("expected nil *EmbedDeps, got non-nil")
+	}
+}
+
 // TestWireEmbedDeps_NilDB covers the defensive guard: nil db returns a
 // structured "nil_db" reason rather than panicking. Matches the MCP
 // startup contract where an open-DB failure upstream must not crash

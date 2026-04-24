@@ -112,6 +112,45 @@ func WireEmbedDeps(ctx context.Context, db *sql.DB, opts EmbedWireOptions) (*Emb
 		return nil, WireEmbedStatus{Reason: "no_bundled_assets", ModelID: modelID}, nil
 	}
 
+	boundModelID := man.Identity.ModelID
+	if boundModelID == "" {
+		boundModelID = modelID
+	}
+
+	// CLI warm-start fast path (LORE-375): skip the probe when this
+	// binary's manifest identity matches the stored meta identity and
+	// state is already 'enabled'. Asset SHA verification still runs
+	// inside WarmStartEmbedder via Extract, which verifies each file's
+	// SHA-256 against the manifest. Probe is only skipped on CLI
+	// invocations (Async=false, LoadIndex=false); the MCP lazy-
+	// reconstruct path is unaffected (it never calls WireEmbedDeps
+	// after startup).
+	if !opts.Async && !opts.LoadIndex {
+		ws := embed.MaybeSkipProbe(ctx, db, man, logger)
+		if ws.Skip {
+			wsr := embed.WarmStartEmbedder(ctx, man, logger)
+			if wsr.Err == nil && wsr.Embedder != nil {
+				deps := &EmbedDeps{
+					Embedder: wsr.Embedder,
+					Index:    nil,
+					ModelID:  boundModelID,
+					Async:    opts.Async,
+					Logger:   logger,
+				}
+				return deps, WireEmbedStatus{
+					Wired:   true,
+					Reason:  "warm_start",
+					ModelID: boundModelID,
+				}, nil
+			}
+			// Warm-start failed (unlikely: asset corruption or platform
+			// gap). Fall through to the full PrepareAndProbe path.
+			logger.Warn("embedder warm-start failed; falling through to full probe",
+				slog.String("err", wsr.Err.Error()),
+			)
+		}
+	}
+
 	// Extract + probe. PrepareAndProbe writes its own structured log
 	// line for the failure mode; we surface the outcome reason.
 	prep, outcome := embed.PrepareAndProbe(ctx, logger)
@@ -124,11 +163,6 @@ func WireEmbedDeps(ctx context.Context, db *sql.DB, opts EmbedWireOptions) (*Emb
 			prep.Close()
 		}
 		return nil, WireEmbedStatus{Reason: reason, ModelID: modelID}, nil
-	}
-
-	boundModelID := man.Identity.ModelID
-	if boundModelID == "" {
-		boundModelID = modelID
 	}
 
 	// Index construction. LoadFromDB is cheap per the ADR-003 10 ms/1k
