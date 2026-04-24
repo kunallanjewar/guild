@@ -53,6 +53,10 @@ type ProbeResult struct {
 	// Dim is the vector length returned by the embedder. Logged for
 	// the "unexpected-dim" failure mode.
 	Dim int
+	// Floor is the acceptance threshold the probe compared against.
+	// Logged alongside Cosine so a failure line is self-contained
+	// without requiring the reader to know ProbeMinCosine.
+	Floor float64
 	// Err is nil on success and non-nil on any failure. Success means
 	// Cosine >= ProbeMinCosine and Dim == Dim (package constant).
 	Err error
@@ -69,30 +73,30 @@ type ProbeResult struct {
 // forward pass itself is uncancellable.
 func RunProbe(ctx context.Context, e Embedder) ProbeResult {
 	if e == nil {
-		return ProbeResult{Err: fmt.Errorf("embed: RunProbe: nil embedder")}
+		return ProbeResult{Floor: ProbeMinCosine, Err: fmt.Errorf("embed: RunProbe: nil embedder")}
 	}
 	ref, err := loadReferenceEmbedding(ProbeString)
 	if err != nil {
-		return ProbeResult{Err: err}
+		return ProbeResult{Floor: ProbeMinCosine, Err: err}
 	}
 	got, err := e.Embed(ctx, ProbeString)
 	if err != nil {
-		return ProbeResult{Err: fmt.Errorf("embed: RunProbe: embed: %w", err)}
+		return ProbeResult{Floor: ProbeMinCosine, Err: fmt.Errorf("embed: RunProbe: embed: %w", err)}
 	}
 	if len(got) != Dim {
-		return ProbeResult{Dim: len(got), Err: fmt.Errorf("embed: RunProbe: got dim=%d want %d", len(got), Dim)}
+		return ProbeResult{Dim: len(got), Floor: ProbeMinCosine, Err: fmt.Errorf("embed: RunProbe: got dim=%d want %d", len(got), Dim)}
 	}
 	if len(ref) != Dim {
-		return ProbeResult{Dim: len(got), Err: fmt.Errorf("embed: RunProbe: reference dim=%d want %d", len(ref), Dim)}
+		return ProbeResult{Dim: len(got), Floor: ProbeMinCosine, Err: fmt.Errorf("embed: RunProbe: reference dim=%d want %d", len(ref), Dim)}
 	}
 	cos := cosineSimilarity(got, ref)
 	if math.IsNaN(cos) || math.IsInf(cos, 0) {
-		return ProbeResult{Dim: len(got), Err: fmt.Errorf("embed: RunProbe: non-finite cosine")}
+		return ProbeResult{Dim: len(got), Floor: ProbeMinCosine, Err: fmt.Errorf("embed: RunProbe: non-finite cosine")}
 	}
 	if cos < ProbeMinCosine {
-		return ProbeResult{Cosine: cos, Dim: len(got), Err: fmt.Errorf("%w: got %.6f want >= %.6f", ErrProbeMismatch, cos, ProbeMinCosine)}
+		return ProbeResult{Cosine: cos, Dim: len(got), Floor: ProbeMinCosine, Err: fmt.Errorf("%w: got %.6f want >= %.6f", ErrProbeMismatch, cos, ProbeMinCosine)}
 	}
-	return ProbeResult{Cosine: cos, Dim: len(got)}
+	return ProbeResult{Cosine: cos, Dim: len(got), Floor: ProbeMinCosine}
 }
 
 // loadReferenceEmbedding parses the embedded reference_vectors.json and

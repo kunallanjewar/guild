@@ -162,12 +162,26 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 		if errors.Is(probe.Err, ErrProbeMismatch) {
 			reason = "probe_mismatch"
 		}
+		// Structured fingerprint on failure: the next operator reading
+		// logs can tell at a glance whether it is asset drift, tokenizer
+		// drift, or pure quantization noise without another round trip.
 		logger.Warn("embedder disabled: probe failed",
 			slog.String("reason", reason),
 			slog.Float64("cosine", probe.Cosine),
+			slog.Float64("floor", probe.Floor),
 			slog.Int("dim", probe.Dim),
 			slog.String("err", probe.Err.Error()),
 			slog.Duration("probe_duration", probeDur),
+			slog.String("platform_tag", man.Identity.PlatformTag),
+			slog.String("model_id", man.Identity.ModelID),
+			slog.String("tokenizer_hash", man.Identity.TokenizerHash),
+			slog.String("runtime_version", man.Identity.RuntimeVersion),
+			slog.String("library_sha256", man.Assets[AssetLibrary].SHA256),
+			slog.String("model_sha256", man.Assets[AssetModel].SHA256),
+			slog.String("vocab_sha256", man.Assets[AssetVocab].SHA256),
+			slog.String("library_path", ext.LibraryPath),
+			slog.String("model_path", ext.ModelPath),
+			slog.String("vocab_path", ext.VocabPath),
 		)
 		closeFn()
 		return nil, InitOutcome{
@@ -183,6 +197,7 @@ func PrepareAndProbe(ctx context.Context, logger *slog.Logger) (*PreparedEmbedde
 	}
 	logger.Info("embedder probe passed",
 		slog.Float64("cosine", probe.Cosine),
+		slog.Float64("floor", probe.Floor),
 		slog.Int("dim", probe.Dim),
 		slog.Duration("probe_duration", probeDur),
 		slog.String("model_id", man.Identity.ModelID),

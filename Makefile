@@ -235,6 +235,12 @@ assets-clean: ## Remove every staged asset (keeps directories + README + .gitign
 	@find $(ASSETS_DIR) -type f \( -name 'model.onnx' -o -name 'vocab.txt' -o -name 'libonnxruntime.*' \) -delete
 	@echo "✓ assets cleaned"
 
+.PHONY: regenerate-reference-vectors
+regenerate-reference-vectors: assets ## Regenerate internal/lore/embed/testdata/reference_vectors.json against the BUNDLED int8 model
+	@$(GO) run -tags=withembed ./cmd/embedref > internal/lore/embed/testdata/reference_vectors.json
+	@echo "✓ reference_vectors.json regenerated against bundled int8 model"
+	@echo "   (see stderr for provenance: library/model/vocab SHAs, platform, timestamp)"
+
 .PHONY: build-embed
 build-embed: assets ## Build the guild binary with embedded runtime assets (-tags=withembed)
 	$(GO) build $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/guild
