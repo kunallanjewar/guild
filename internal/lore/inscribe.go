@@ -30,6 +30,15 @@ type InscribeParams struct {
 	NoWarn        bool      // suppress the ≤60-word principle warning
 	StrictProject bool      // opt-out of cross-project dedup (default: cross-project)
 	Now           time.Time // injectable for deterministic tests; zero → time.Now().UTC()
+
+	// Embed is the optional embeddings pipeline. When nil or not Enabled,
+	// Inscribe commits the row with vector_state='pending' (the schema
+	// default) and skips every vector-write step. When Enabled, Inscribe
+	// dispatches a Tx2 after the Tx1 commit per ADR-003 "Mutation semantics":
+	// async for MCP (Embed.Async=true) so inscribe latency stays flat, sync
+	// for CLI so the process can exit cleanly. Tx2 failures are logged and
+	// never surface as caller errors.
+	Embed *EmbedDeps
 }
 
 // InscribeResult carries the inserted Entry plus any dedup hits surfaced
@@ -241,6 +250,12 @@ func Inscribe(ctx context.Context, db *sql.DB, p *InscribeParams) (*InscribeResu
 				formatEntryID(fromID), formatEntryID(id), err)
 		}
 	}
+
+	// Phase 1 vector write. No-op when Embed is nil / disabled; otherwise
+	// runs the Tx2 helper async (MCP) or sync (CLI) per ADR-003
+	// "Mutation semantics". Tx2 failures log-and-swallow so a broken
+	// embedder never blocks a successful inscribe.
+	p.Embed.runTx2(ctx, db, entry.ID, entry.Summary)
 
 	return &InscribeResult{
 		Entry:       entry,
