@@ -114,7 +114,7 @@ type Index struct {
 type Option func(*Index)
 
 // WithLogger attaches a custom slog.Logger. Without this the index
-// uses slog.Default() — fine for production where the caller has
+// uses slog.Default(), fine for production where the caller has
 // already configured a project-wide handler.
 func WithLogger(l *slog.Logger) Option {
 	return func(i *Index) { i.logger = l }
