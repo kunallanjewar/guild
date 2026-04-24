@@ -198,41 +198,101 @@ func TestSessionLine_HealthyEmitsNothing(t *testing.T) {
 	}
 }
 
-// TestSessionLine_Variants tests each of the four non-healthy session-start
-// line shapes using a table-driven approach. Each row sets up meta/DB state
-// and checks the exact format prescribed by ADR-003 "Failure visibility".
+// TestSessionLine_Variants tests each of the non-healthy session-start line
+// shapes using a table-driven approach. Each row sets up meta/DB state and
+// checks the exact format prescribed by ADR-003 "Failure visibility".
 func TestSessionLine_Variants(t *testing.T) {
 	type tc struct {
-		name      string
-		state     EmbedderState
-		covNum    int64
-		covDen    int64
-		errCount  int64
-		pending   int
-		stale     int
-		lastErr   string
-		wantStart string // prefix the line must start with
-		wantSub   string // substring the line must contain
+		name        string
+		state       EmbedderState
+		stateReason string // written to meta.embedder_state_reason when non-empty
+		covNum      int64
+		covDen      int64
+		errCount    int64
+		pending     int
+		stale       int
+		lastErr     string
+		wantExact   string // exact line, when non-empty (takes priority over wantStart/wantSub)
+		wantStart   string // prefix the line must start with
+		wantSub     string // substring the line must contain
 	}
 
 	cases := []tc{
+		// Seven known reasons from PrepareAndProbe / WriteMeta.
 		{
-			name:      "disabled_windows",
-			state:     EmbedderStateDisabled,
-			covNum:    0,
-			covDen:    10,
-			wantStart: "embedder: disabled",
-			wantSub:   "disabled",
+			name:        "disabled_unsupported_platform",
+			state:       EmbedderStateDisabled,
+			stateReason: "unsupported_platform",
+			covDen:      10,
+			wantExact:   "embedder: disabled (unsupported_platform)",
 		},
 		{
-			name:      "disabled_dylib_probe",
+			name:        "disabled_probe_mismatch",
+			state:       EmbedderStateDisabled,
+			stateReason: "probe_mismatch",
+			covDen:      10,
+			wantExact:   "embedder: disabled (probe_mismatch)",
+		},
+		{
+			name:        "disabled_extract_failed",
+			state:       EmbedderStateDisabled,
+			stateReason: "extract_failed",
+			covDen:      10,
+			wantExact:   "embedder: disabled (extract_failed)",
+		},
+		{
+			name:        "disabled_no_assets",
+			state:       EmbedderStateDisabled,
+			stateReason: "no_assets",
+			covDen:      10,
+			wantExact:   "embedder: disabled (no_assets)",
+		},
+		{
+			name:        "disabled_embedder_init_failed",
+			state:       EmbedderStateDisabled,
+			stateReason: "embedder_init_failed",
+			covDen:      10,
+			wantExact:   "embedder: disabled (init_failed)",
+		},
+		{
+			name:        "disabled_probe_error",
+			state:       EmbedderStateDisabled,
+			stateReason: "probe_error",
+			covDen:      10,
+			wantExact:   "embedder: disabled (probe_error)",
+		},
+		{
+			name:        "disabled_binary_outdated",
+			state:       EmbedderStateDisabled,
+			stateReason: "binary_outdated",
+			covDen:      10,
+			wantExact:   "embedder: disabled (binary_outdated)",
+		},
+		// Forward-compat: unknown future reason is rendered verbatim.
+		{
+			name:        "disabled_unknown_reason_verbatim",
+			state:       EmbedderStateDisabled,
+			stateReason: "some_future_reason",
+			covDen:      10,
+			wantExact:   "embedder: disabled (some_future_reason)",
+		},
+		// Legacy fallback: no state_reason stored, but embed_last_error present.
+		{
+			name:      "disabled_legacy_last_error",
 			state:     EmbedderStateDisabled,
-			covNum:    0,
 			covDen:    10,
 			lastErr:   "libonnxruntime.dylib failed to load",
 			wantStart: "embedder: disabled",
 			wantSub:   "dylib probe failed",
 		},
+		// Disabled with no reason and no last error: bare "embedder: disabled".
+		{
+			name:      "disabled_no_reason_at_all",
+			state:     EmbedderStateDisabled,
+			covDen:    10,
+			wantExact: "embedder: disabled",
+		},
+		// Non-disabled states.
 		{
 			name:      "backfilling",
 			state:     EmbedderStateEnabled,
@@ -268,6 +328,12 @@ func TestSessionLine_Variants(t *testing.T) {
 			ctx := context.Background()
 			seedMeta(t, db, tc.state, tc.covNum, tc.covDen, tc.errCount)
 
+			if tc.stateReason != "" {
+				_, _ = db.ExecContext(ctx,
+					`INSERT OR REPLACE INTO meta (key, value) VALUES ('embedder_state_reason', ?)`,
+					tc.stateReason,
+				)
+			}
 			if tc.lastErr != "" {
 				_, _ = db.ExecContext(ctx,
 					`INSERT OR REPLACE INTO meta (key, value) VALUES ('embed_last_error', ?)`,
@@ -290,8 +356,17 @@ func TestSessionLine_Variants(t *testing.T) {
 			if line == "" {
 				t.Fatalf("expected non-empty session-start line for %s; got empty", tc.name)
 			}
-			if len(line) < len(tc.wantStart) || line[:len(tc.wantStart)] != tc.wantStart {
-				t.Errorf("line %q does not start with %q", line, tc.wantStart)
+
+			if tc.wantExact != "" {
+				if line != tc.wantExact {
+					t.Errorf("line = %q, want exact %q", line, tc.wantExact)
+				}
+				return
+			}
+			if tc.wantStart != "" {
+				if len(line) < len(tc.wantStart) || line[:len(tc.wantStart)] != tc.wantStart {
+					t.Errorf("line %q does not start with %q", line, tc.wantStart)
+				}
 			}
 			if tc.wantSub != "" && !containsStr(line, tc.wantSub) {
 				t.Errorf("line %q missing expected substring %q", line, tc.wantSub)
