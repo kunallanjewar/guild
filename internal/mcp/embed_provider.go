@@ -206,6 +206,15 @@ func (p *embedProvider) reconstruct(ctx context.Context, reason string) *lore.Em
 		slog.Int64("coverage_den", coverageDen),
 		slog.Int64("vector_epoch", epoch),
 	)
+	// Trigger auto-backfill the first time we observe a wired embedder.
+	// The sync.Once inside maybeTriggerAutoBackfill guarantees exactly-
+	// once semantics per process, so concurrent provider resolves racing
+	// the initial enable all collapse to one invocation. Non-blocking:
+	// each per-corpus backfill runs in its own goroutine. QUEST-229 /
+	// LORE-384.
+	//
+	//nolint:contextcheck // the auto-backfill goroutine is server-lifetime work and intentionally uses context.Background() internally, per QUEST-229 design bar.
+	maybeTriggerAutoBackfill(deps, p.logger)
 	return deps
 }
 
