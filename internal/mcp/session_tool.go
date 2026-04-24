@@ -12,8 +12,20 @@ import (
 	"github.com/mathomhaus/guild/internal/lore/embed"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
+	"github.com/mathomhaus/guild/internal/release"
 	"github.com/mathomhaus/guild/internal/session"
 )
+
+// binaryVersion is the ldflags-stamped version string injected by
+// cmd/guild/mcp.go via SetBinaryVersion. Defaults to "dev" so MCP tests
+// that never call SetBinaryVersion see a stable, non-semver sentinel that
+// suppresses the nudge (IsNewer returns false, nil for "dev").
+var binaryVersion = "dev"
+
+// SetBinaryVersion wires the ldflags-stamped version into the MCP layer
+// so guild_session_start can emit an upgrade nudge when appropriate.
+// Called from cmd/guild/mcp.go init(), before the first MCP session.
+func SetBinaryVersion(v string) { binaryVersion = v }
 
 // mcpProjectResolver is the Resolver used by handleSessionStart when the
 // agent omits the project arg and we need to auto-infer from the MCP
@@ -213,6 +225,12 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 	body := formatBounties(res, briefOnly)
 	if embedderHealthLine != "" {
 		body += "\n" + embedderHealthLine + "\n"
+	}
+	// Upgrade nudge: check for a newer release and append a line when one
+	// is available. Silent on all failures; zero-allocation no-op when
+	// up-to-date or when GUILD_NO_UPDATE_CHECK=1.
+	if nudge := release.CheckAndNudgeMCP(ctx, binaryVersion); nudge != "" {
+		body += "\n" + nudge + "\n"
 	}
 	return body
 }
