@@ -113,7 +113,7 @@ func Reforge(ctx context.Context, db *sql.DB, oldID, newID int64, now time.Time,
 		if err := db.QueryRowContext(ctx,
 			`SELECT summary FROM entries WHERE id = ?`, newID,
 		).Scan(&summary); err != nil {
-			// Could not load — skip silently. The caller has already
+			// Could not load: skip silently. The caller has already
 			// committed the row-level reforge; a missed re-embed will
 			// be fixed up on the next init-backfill pass.
 			return nil
