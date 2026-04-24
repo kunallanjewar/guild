@@ -10,16 +10,19 @@ import (
 )
 
 // TestBuildMCPLoreDeps_EmbedField confirms the MCP-side Deps builder
-// threads currentEmbedDeps into command.Deps.Embed. The test drives
-// two shapes: (1) embedder state "disabled" so wireEmbedDepsOnce
-// should land nil; (2) manual injection simulating the wired path.
+// threads currentEmbedProvider into command.Deps.Embed. The test drives
+// two shapes: (1) a fresh DB whose meta is schema-seeded to
+// "embedder_state=disabled" so the provider resolves to nil; (2) no
+// provider installed, demonstrating buildMCPLoreDeps tolerates a nil
+// provider without a typed-nil interface hazard.
+//
 // Default-build machines can't probe the real BGE path without
-// -tags=withembed bundled bytes, so the wired assertion uses a manual
-// sentinel and trusts the wiring helper's own tests (see
-// internal/lore/embed_wiring_test.go) for the meta-probe truth table.
+// -tags=withembed bundled bytes, so the "enabled wiring" assertion is
+// covered by TestEmbedProvider_StateFlip below (which uses meta-only
+// stubs) and by the internal/lore/embed_wiring_test.go truth table.
 func TestBuildMCPLoreDeps_EmbedField(t *testing.T) {
-	// Route lore.db through a temp file so wireEmbedDepsOnce does not
-	// hit the user's real ~/.guild/lore.db.
+	// Route lore.db through a temp file so the provider does not hit
+	// the user's real ~/.guild/lore.db.
 	tmpDir := t.TempDir()
 	origLdb := ldbPath
 	ldbPath = func() (string, error) {
@@ -39,37 +42,33 @@ func TestBuildMCPLoreDeps_EmbedField(t *testing.T) {
 	}
 	_ = db.Close()
 
-	t.Run("disabled_meta_yields_nil_embed", func(t *testing.T) {
-		// Reset and call the production entry point.
-		currentEmbedDeps = wireEmbedDepsOnce()
-		if currentEmbedDeps != nil {
-			t.Errorf("wireEmbedDepsOnce should return nil when meta.embedder_state='disabled'; got %+v", currentEmbedDeps)
-		}
-
-		deps := buildMCPLoreDeps()
-		if deps.Embed != nil {
-			t.Errorf("buildMCPLoreDeps().Embed = %+v, want nil", deps.Embed)
-		}
-	})
-
-	t.Run("wired_embed_threads_into_deps", func(t *testing.T) {
-		// Simulate a successful wire: manually inject a non-nil
-		// *lore.EmbedDeps (empty, but non-nil pointer matters for the
-		// threading assertion). A real enabled-path test requires
-		// bundled assets, covered by the withembed integration run.
-		currentEmbedDeps = &lore.EmbedDeps{ModelID: "sentinel-model-id"}
-		t.Cleanup(func() { currentEmbedDeps = nil })
+	t.Run("disabled_meta_yields_nil_embed_resolve", func(t *testing.T) {
+		currentEmbedProvider = newEmbedProvider(openLoreDB, newLogger())
+		t.Cleanup(func() { currentEmbedProvider = nil })
 
 		deps := buildMCPLoreDeps()
 		if deps.Embed == nil {
-			t.Fatalf("buildMCPLoreDeps().Embed is nil; want the wired sentinel")
+			t.Fatalf("buildMCPLoreDeps().Embed should carry the provider, got nil")
 		}
-		e, ok := deps.Embed.(*lore.EmbedDeps)
+		// Resolve through the same path production lore handlers
+		// exercise.
+		resolver, ok := deps.Embed.(interface {
+			ResolveEmbedDeps(ctx context.Context) *lore.EmbedDeps
+		})
 		if !ok {
-			t.Fatalf("deps.Embed has type %T, want *lore.EmbedDeps", deps.Embed)
+			t.Fatalf("deps.Embed has type %T, want embedResolver", deps.Embed)
 		}
-		if e.ModelID != "sentinel-model-id" {
-			t.Errorf("deps.Embed.ModelID = %q, want sentinel-model-id", e.ModelID)
+		got := resolver.ResolveEmbedDeps(ctx)
+		if got != nil {
+			t.Errorf("ResolveEmbedDeps on disabled meta should return nil; got %+v", got)
+		}
+	})
+
+	t.Run("nil_provider_leaves_embed_field_nil", func(t *testing.T) {
+		currentEmbedProvider = nil
+		deps := buildMCPLoreDeps()
+		if deps.Embed != nil {
+			t.Errorf("buildMCPLoreDeps().Embed = %+v, want nil when provider is nil", deps.Embed)
 		}
 	})
 }

@@ -49,7 +49,7 @@ var ReforgeCommand = &command.Command[ReforgeInput, ReforgeOutput]{
 		// avoid the command↔lore import cycle). When the adapter layer
 		// did not construct an EmbedDeps, embedFromDeps returns nil and
 		// Reforge behaves exactly like the pre-Phase-1 path.
-		if err := Reforge(ctx, db, oldID, newID, time.Time{}, embedFromDeps(d)); err != nil {
+		if err := Reforge(ctx, db, oldID, newID, time.Time{}, embedFromDeps(ctx, d)); err != nil {
 			return ReforgeOutput{}, err
 		}
 		return ReforgeOutput{OldID: oldID, NewID: newID}, nil
