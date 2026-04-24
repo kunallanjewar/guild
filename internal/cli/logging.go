@@ -11,14 +11,14 @@ import (
 // slog level for CLI invocations. Recognized values (case-insensitive):
 // "debug", "info", "warn" (or "warning"), "error". Any unrecognized or
 // empty value defaults to Warn so that scripted agents see only real
-// signal on stderr — not warm-start diagnostics emitted on every call.
+// signal on stderr (not warm-start diagnostics emitted on every call).
 const logLevelEnv = "GUILD_LOG_LEVEL"
 
 // newCLILogger returns a text-format slog.Logger writing to stderr,
 // gated at the level read from GUILD_LOG_LEVEL (default: Warn).
 //
 // CLI callers (short-lived processes) use text format. The MCP server
-// has its own GUILD_MCP_LOG_LEVEL / GUILD_MCP_LOG_FORMAT pair — see
+// has its own GUILD_MCP_LOG_LEVEL / GUILD_MCP_LOG_FORMAT pair; see
 // internal/mcp/logging.go.
 func newCLILogger() *slog.Logger {
 	return newCLILoggerTo(os.Stderr, os.Getenv(logLevelEnv))
