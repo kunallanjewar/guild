@@ -35,11 +35,12 @@ import (
 // the caller (lore package today, cmd/guild tomorrow) and passed
 // through as a value so the Tx2 helper has zero global state.
 //
-// Every field is required except Logger (nil defaults to slog.Default).
+// Every field is required except Logger (nil defaults to slog.Default)
+// and Corpus (nil defaults to LoreCorpus{} for backward compat).
 //
-// ModelID is the embedder's bound model_id, which must equal
-// meta.embedder_model_id at WriteVector time. Mismatch triggers the
-// graceful abort path documented in invariant 2.
+// ModelID is the embedder's bound model_id, which must equal the
+// corpus's EmbedderModelID meta row at WriteVector time. Mismatch
+// triggers the graceful abort path documented in invariant 2.
 type HotDeps struct {
 	// Embedder encodes the summary text into a float32 vector. The
 	// hot path quantizes to int8 via Quantize. Must be non-nil (the
@@ -54,16 +55,31 @@ type HotDeps struct {
 	// and leaves cross-process reload as the only notification path.
 	Index *Index
 
+	// Corpus names the tables, columns, and meta keys WriteVector
+	// operates against. Zero value falls back to LoreCorpus{} so
+	// callers that predate the port keep working.
+	Corpus VectorCorpus
+
 	// ModelID is the canonical identity the binary ships with. At Tx2
-	// open we SELECT meta.embedder_model_id and compare; a mismatch
-	// means a newer binary has re-seeded the DB and this older binary
-	// should not write.
+	// open we SELECT the corpus's EmbedderModelID meta row and compare;
+	// a mismatch means a newer binary has re-seeded the DB and this
+	// older binary should not write.
 	ModelID string
 
 	// Logger receives one structured line per Tx2 outcome: success
 	// (debug), model_id mismatch (warn), and unexpected SQL failures
 	// (error). nil defaults to slog.Default.
 	Logger *slog.Logger
+}
+
+// resolveCorpus returns deps.Corpus or the default LoreCorpus when
+// unset. Kept as a method so every internal use site spells the
+// default identically.
+func (d HotDeps) resolveCorpus() VectorCorpus {
+	if d.Corpus == nil {
+		return LoreCorpus{}
+	}
+	return d.Corpus
 }
 
 // WriteVectorResult reports what WriteVector did. Callers use this to
@@ -132,6 +148,7 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 	if logger == nil {
 		logger = slog.Default()
 	}
+	corpus := deps.resolveCorpus()
 
 	// 1. Encode outside the transaction. Embedder.Embed is ~0.9 ms
 	//    on the hot path; keeping it outside the lock window keeps
@@ -151,7 +168,7 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 			)
 			return WriteVectorResult{}, nil
 		}
-		if err := bumpEmbedErrorCount(ctx, db, "embed_failed"); err != nil {
+		if err := bumpEmbedErrorCount(ctx, db, corpus, "embed_failed"); err != nil {
 			logger.Error("embed/hot: bump embed_error_count failed",
 				"entry_id", entryID,
 				"bump_err", err,
@@ -160,7 +177,7 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 		return WriteVectorResult{}, fmt.Errorf("embed/hot: encode: %w", err)
 	}
 	if len(fvec) != VecDim {
-		if err := bumpEmbedErrorCount(ctx, db, "bad_dim"); err != nil {
+		if err := bumpEmbedErrorCount(ctx, db, corpus, "bad_dim"); err != nil {
 			logger.Error("embed/hot: bump embed_error_count failed",
 				"entry_id", entryID,
 				"bump_err", err,
@@ -187,10 +204,13 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 	committed := false
 	defer rollback(&committed)
 
-	// 3. Model identity guard. A mismatch is a graceful abort.
+	// 3. Model identity guard. A mismatch is a graceful abort. Meta
+	//    key is corpus-resolved so a non-lore corpus uses its own
+	//    EmbedderModelID row and does not alias with lore's.
 	var metaModelID string
 	err = conn.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key = 'embedder_model_id'`,
+		`SELECT value FROM meta WHERE key = ?`,
+		corpus.MetaKey(FieldEmbedderModelID),
 	).Scan(&metaModelID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -223,7 +243,7 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 			"meta_model_id", metaModelID,
 			"reason", "binary_outdated",
 		)
-		if err := bumpEmbedErrorCount(ctx, db, "binary_outdated"); err != nil {
+		if err := bumpEmbedErrorCount(ctx, db, corpus, "binary_outdated"); err != nil {
 			logger.Error("embed/hot: bump embed_error_count failed",
 				"entry_id", entryID,
 				"bump_err", err,
@@ -242,11 +262,9 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 	for i, v := range qvec {
 		blob[i] = byte(v)
 	}
-	res, err := conn.ExecContext(ctx, `
-		INSERT OR IGNORE INTO lore_vectors
-		  (entry_id, model_id, dim, vec, encoded_at, content_hash)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, entryID, deps.ModelID, VecDim, blob, nowUnix, contentHash)
+	insertQuery := fmt.Sprintf(`INSERT OR IGNORE INTO %s (entry_id, model_id, dim, vec, encoded_at, content_hash) VALUES (?, ?, ?, ?, ?, ?)`, corpus.VectorTable()) //nolint:gosec // G201: table name is a compile-time corpus accessor, not user input.
+	res, err := conn.ExecContext(ctx, insertQuery,                                                                                                                  //nolint:sqlcheck // table name is a compile-time corpus accessor.
+		entryID, deps.ModelID, VecDim, blob, nowUnix, contentHash)
 	if err != nil {
 		return WriteVectorResult{}, fmt.Errorf("embed/hot: insert lore_vectors: %w", err)
 	}
@@ -264,23 +282,28 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 	// If inserted, bump coverage_num atomically. Epoch always bumps
 	// when a new vector appears; on no-op we still bump only when we
 	// changed the entry's state (vector_state flip).
+	epochKey := corpus.MetaKey(FieldVectorEpoch)
+	coverageNumKey := corpus.MetaKey(FieldVectorCoverageNum)
 	if inserted > 0 {
-		// UPDATE entries.vector_state='indexed'. Harmless if already
-		// indexed (rare: self-race).
-		if _, err := conn.ExecContext(ctx,
-			`UPDATE entries SET vector_state = 'indexed', updated_at = updated_at WHERE id = ?`,
-			entryID,
-		); err != nil {
-			return WriteVectorResult{}, fmt.Errorf("embed/hot: update entries vector_state: %w", err)
+		// UPDATE vector_state='indexed' when the corpus tracks state.
+		// Harmless if already indexed (rare: self-race).
+		if stateCol := corpus.VectorStateColumn(); stateCol != "" {
+			flipQuery := fmt.Sprintf(`UPDATE %s SET %s = 'indexed', updated_at = updated_at WHERE %s = ?`,
+				corpus.EntityTable(), stateCol, corpus.EntityIDColumn())
+			if _, err := conn.ExecContext(ctx, flipQuery, entryID); err != nil { //nolint:sqlcheck // table + columns are compile-time corpus accessors.
+				return WriteVectorResult{}, fmt.Errorf("embed/hot: update entries vector_state: %w", err)
+			}
 		}
 		// Atomic counter bumps. The "X = X + 1" form is evaluated
 		// inside SQLite under the BEGIN IMMEDIATE, so the read and
-		// write happen without interleaving any other writer.
+		// write happen without interleaving any other writer. Keys are
+		// corpus-resolved so two corpora cannot alias on a shared
+		// meta row.
 		if _, err := conn.ExecContext(ctx, `
 			UPDATE meta
 			   SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
-			 WHERE key IN ('vector_epoch', 'vector_coverage_num')
-		`); err != nil {
+			 WHERE key IN (?, ?)
+		`, epochKey, coverageNumKey); err != nil {
 			return WriteVectorResult{}, fmt.Errorf("embed/hot: bump epoch and coverage_num: %w", err)
 		}
 	} else {
@@ -291,8 +314,8 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 		if _, err := conn.ExecContext(ctx, `
 			UPDATE meta
 			   SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
-			 WHERE key = 'vector_epoch'
-		`); err != nil {
+			 WHERE key = ?
+		`, epochKey); err != nil {
 			return WriteVectorResult{}, fmt.Errorf("embed/hot: bump epoch (noop insert): %w", err)
 		}
 	}
@@ -302,7 +325,7 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 	// BEGIN IMMEDIATE so the value reflects our own write.
 	var epochStr string
 	if err := conn.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key = 'vector_epoch'`,
+		`SELECT value FROM meta WHERE key = ?`, epochKey,
 	).Scan(&epochStr); err != nil {
 		return WriteVectorResult{}, fmt.Errorf("embed/hot: read epoch: %w", err)
 	}
@@ -357,8 +380,9 @@ func ContentHash(summary string) string {
 // bumpEmbedErrorCount is the helper for the two "graceful abort" paths
 // (model mismatch, embedder failure). Opens its own BEGIN IMMEDIATE
 // because the main Tx2 has either not yet opened or has already
-// rolled back.
-func bumpEmbedErrorCount(ctx context.Context, db *sql.DB, reason string) error {
+// rolled back. The key is resolved through the corpus so a non-lore
+// corpus increments its own counter instead of aliasing on lore's.
+func bumpEmbedErrorCount(ctx context.Context, db *sql.DB, corpus VectorCorpus, reason string) error {
 	conn, rollback, err := beginImmediateLocal(ctx, db, "embed/hot: bump embed_error_count")
 	if err != nil {
 		return err
@@ -369,8 +393,8 @@ func bumpEmbedErrorCount(ctx context.Context, db *sql.DB, reason string) error {
 	if _, err := conn.ExecContext(ctx, `
 		UPDATE meta
 		   SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
-		 WHERE key = 'embed_error_count'
-	`); err != nil {
+		 WHERE key = ?
+	`, corpus.MetaKey(FieldEmbedErrorCount)); err != nil {
 		return fmt.Errorf("embed/hot: bump embed_error_count (%s): %w", reason, err)
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
