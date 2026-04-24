@@ -228,6 +228,8 @@ Use these shapes when you need a concrete schema:
   lore_echoes()
   lore_whispers(topic="auth")
   lore_ripples(entry_id=34, depth=3, direction="out")
+  lore_health()
+  lore_embed_rebuild()
   quest_post(subject="Add retry budget", priority="P1", files="internal/retry/retry.go", acceptance="tests pass || jitter documented")
   quest_update(quest_id="QUEST-7", depends_on="QUEST-6")
   quest_accept(quest_id="QUEST-7")

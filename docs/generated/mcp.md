@@ -2,7 +2,7 @@
 
 # guild MCP tool catalog
 
-Every tool a registered MCP client sees. 38 tools.
+Every tool a registered MCP client sees. 40 tools.
 
 ## Tools
 
@@ -14,6 +14,8 @@ Every tool a registered MCP client sees. 38 tools.
 - [`lore_commune`](#lore_commune) — Health report for oath bloat and duplicate lore.
 - [`lore_dossier`](#lore_dossier) — Compile ~2000-token project context for subagent spawn prompts.
 - [`lore_echoes`](#lore_echoes) — List stale/decayed entries the next agent should review or reforge.
+- [`lore_embed_rebuild`](#lore_embed_rebuild) — Delete all lore_vectors rows for the active project, flip every active entry's vector_state to 'pending', then encode each entry and insert the resulting int8 vectors.
+- [`lore_health`](#lore_health) — Print the embedder health section: model_id, tokenizer_hash, runtime_version, dim, coverage (num/den and percent), pending count, stale count, last encode error (if any), last successful encode timestamp, and rolling embed_error_count.
 - [`lore_inquest`](#lore_inquest) — Audit the oath wall for narrative-bloat principles (>60 words).
 - [`lore_inscribe`](#lore_inscribe) — Store knowledge that transcends the current task — patterns, decisions, research that outlive the quest.
 - [`lore_link`](#lore_link) — Create an informs provenance edge between two entries.
@@ -272,6 +274,50 @@ _no arguments_
       "description": "also flag entries whose file_path was modified after creation",
       "type": "boolean"
     },
+    "project": {
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+</details>
+
+## `lore_embed_rebuild`
+
+Delete all lore_vectors rows for the active project, flip every active entry's vector_state to 'pending', then encode each entry and insert the resulting int8 vectors. Safe under concurrent MCP servers: uses BEGIN IMMEDIATE for the reset phase and INSERT OR IGNORE for each vector write (ADR-003 invariants).
+
+_no arguments_
+
+<details><summary>Raw JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "project": {
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+</details>
+
+## `lore_health`
+
+Print the embedder health section: model_id, tokenizer_hash, runtime_version, dim, coverage (num/den and percent), pending count, stale count, last encode error (if any), last successful encode timestamp, and rolling embed_error_count.
+
+_no arguments_
+
+<details><summary>Raw JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
     "project": {
       "type": "string"
     }

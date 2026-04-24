@@ -20,6 +20,8 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild lore commune`](#guild-lore-commune) — health report for oath bloat and duplicate lore
 - [`guild lore dossier`](#guild-lore-dossier) — emit ~2k-token project context bundle for subagents
 - [`guild lore echoes`](#guild-lore-echoes) — surface stale entries for review
+- [`guild lore embed-rebuild`](#guild-lore-embed-rebuild) — reset and rebuild the embedding vector index for the active project
+- [`guild lore health`](#guild-lore-health) — embedder health report (coverage, pending, stale, errors)
 - [`guild lore init`](#guild-lore-init) — register the current git repository as a guild project
 - [`guild lore inquest`](#guild-lore-inquest) — audit oath wall for >60-word principles
 - [`guild lore inscribe`](#guild-lore-inscribe) — inscribe a new knowledge entry into the lore
@@ -299,6 +301,48 @@ List stale/decayed entries the next agent should review or reforge. Cross-checks
 | flag | type | default | description |
 | --- | --- | --- | --- |
 | `--git-aware` | bool | `false` | also flag entries whose file_path changed after creation |
+| `--json` | bool | `false` | emit structured JSON result instead of formatted text |
+| `--project`, `-p` | string | `—` | project override |
+
+## `guild lore embed-rebuild`
+
+reset and rebuild the embedding vector index for the active project
+
+**Usage**
+
+```
+guild lore embed-rebuild [flags]
+```
+
+**Aliases:** embed-reset
+
+Delete all lore_vectors rows for the active project, flip every active entry's vector_state to 'pending', then encode each entry and insert the resulting int8 vectors. Safe under concurrent MCP servers: uses BEGIN IMMEDIATE for the reset phase and INSERT OR IGNORE for each vector write (ADR-003 invariants).
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--json` | bool | `false` | emit structured JSON result instead of formatted text |
+| `--project`, `-p` | string | `—` | project override |
+
+## `guild lore health`
+
+embedder health report (coverage, pending, stale, errors)
+
+**Usage**
+
+```
+guild lore health [flags]
+```
+
+**Aliases:** embedder-health
+
+Print the embedder health section: model_id, tokenizer_hash, runtime_version, dim, coverage (num/den and percent), pending count, stale count, last encode error (if any), last successful encode timestamp, and rolling embed_error_count.
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
 | `--json` | bool | `false` | emit structured JSON result instead of formatted text |
 | `--project`, `-p` | string | `—` | project override |
 
