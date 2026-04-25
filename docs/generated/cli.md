@@ -35,6 +35,7 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild lore ripples`](#guild-lore-ripples) — walk provenance edges from a seed entry
 - [`guild lore seal`](#guild-lore-seal) — seal an entry, archiving it from active circulation
 - [`guild lore study`](#guild-lore-study) — full detail + linked entries graph
+- [`guild lore unlink`](#guild-lore-unlink) — remove a provenance link between entries
 - [`guild lore update`](#guild-lore-update) — edit fields or reclassify an entry
 - [`guild lore whispers`](#guild-lore-whispers) — show current idea pipeline (kind=idea, status=seed|exploring)
 - [`guild mcp`](#guild-mcp) — MCP server subcommands
@@ -618,6 +619,27 @@ guild lore study LORE-N [flags]
 | flag | type | default | description |
 | --- | --- | --- | --- |
 | `--project`, `-p` | string | `—` | project id (defaults to git toplevel) |
+
+## `guild lore unlink`
+
+remove a provenance link between entries
+
+**Usage**
+
+```
+guild lore unlink FROM_ID [flags]
+```
+
+Remove an informs (or supersedes/contradicts) edge from the provenance graph. Idempotent: removing a non-existent edge returns success with a 'no matching edge' note.
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--informs` | string | `—` | target entry id (LORE-N or bare N), the one that was being informed |
+| `--json` | bool | `false` | emit structured JSON result instead of formatted text |
+| `--project`, `-p` | string | `—` | project override |
+| `--relation` | string | `—` | link relation to remove: informs (default) \| supersedes \| contradicts |
 
 ## `guild lore update`
 
