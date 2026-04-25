@@ -99,7 +99,15 @@ var autoBackfillDoneCh chan struct{}
 func resetAutoBackfillState() {
 	autoBackfillOnce = sync.Once{}
 	autoBackfillDoneCh = nil
+	autoBackfillInsertHook = nil
 }
+
+// autoBackfillInsertHook is a test-only seam that lets the regression
+// test for QUEST-248 inject a fail-intermittently shim around the real
+// insertVectorRow without invasive surgery. Production code leaves this
+// nil; embed.Backfill then calls insertVectorRow directly. Tests assign
+// it under t.Cleanup so concurrent runs do not see each other's hook.
+var autoBackfillInsertHook func(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, entry embed.PendingEntry, vec []float32, modelID string) error
 
 // maybeTriggerAutoBackfill is the single entry point invoked from
 // embedProvider.reconstruct after a successful wire. Called with the
@@ -320,12 +328,48 @@ func sanityReference(corpus embed.VectorCorpus) (refTable, refQuery string, ok b
 	}
 }
 
-// runOneCorpusBackfill encodes one corpus end-to-end: promotes the
-// corpus meta state if needed (LORE-384 upgrade path for corpora whose
-// state seed is still 'disabled'), then invokes embed.Backfill. Emits
-// one INFO line at start, one INFO at completion, or one ERROR on
-// failure. Never panics; the caller's goroutine recovers silently via
-// the normal defer chain.
+// backfillIterCap caps the bounded inner loop in runOneCorpusBackfill.
+// 5 gives ~5x the throughput of single-pass against transient writer-lock
+// contention (LORE-416's diagnosed dominant failure mode) without risking
+// pathological loops on persistent bugs (e.g. a model-side encode error
+// every cycle). The exit conditions inside runOneCorpusBackfill are:
+//
+//   - coverage >= backfillCoverageFloor (success)
+//   - res.Embedded == 0 in the latest cycle (no progress)
+//   - iteration count reaches the cap
+//
+// Any of the three terminates the loop; the cap is the last-resort guard.
+const backfillIterCap = 5
+
+// State-reason values written by the auto-backfill finalize helper. Three
+// values reflect the actual outcome (LORE-416): "promoted" means coverage
+// cleared the floor, "partial" means coverage exists but is below the
+// floor, "no_progress" means zero rows landed even though the embedder
+// is wired. Operators read state_reason to triage; the values must remain
+// honest about what actually happened.
+const (
+	stateReasonAutoBackfillPromoted   = "auto_backfill_promoted"
+	stateReasonAutoBackfillPartial    = "auto_backfill_partial"
+	stateReasonAutoBackfillNoProgress = "auto_backfill_no_progress"
+)
+
+// runOneCorpusBackfill encodes one corpus end-to-end with a bounded
+// inner loop (LORE-416 / QUEST-248): re-invoke embed.Backfill until
+// coverage clears the floor, no progress is observed in the latest
+// cycle, or the iteration cap is reached. Each Backfill call uses a
+// LEFT JOIN to find pending rows so re-invoking naturally picks up the
+// rows that failed last time.
+//
+// Final state-promote runs AFTER the loop with a tri-state reason that
+// reflects the actual outcome ("promoted" / "partial" / "no_progress").
+// LORE-411 named the original anti-pattern: state was promoted before
+// Backfill ran, so 9/247 coverage looked like success.
+//
+// Emits one INFO line at start, one INFO per inner iteration, one INFO
+// at completion (carrying the dominant failure class for the last
+// cycle), or one ERROR on a non-recoverable open/finalize failure.
+// Never panics; the caller's goroutine recovers silently via the
+// normal defer chain.
 func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lore.EmbedDeps, pending int64, coverageBefore float64, logger *slog.Logger) {
 	started := time.Now()
 	corpusName := tgt.corpus.Name()
@@ -346,86 +390,184 @@ func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lor
 	}
 	defer func() { _ = db.Close() }()
 
-	// Promote per-corpus meta identity if the state row is not yet
-	// 'enabled'. Copies the binary's current identity from the lore
-	// *EmbedDeps (same embedder, same model_id, same tokenizer). This
-	// is the upgrade-path fix for corpora whose schema shipped with
-	// embedder_state='disabled' (e.g. QuestCorpus in migration 005).
-	if err := ensureCorpusStateEnabled(ctx, db, tgt.corpus, deps.ModelID); err != nil {
-		logger.Error("auto-backfill failed: promote corpus state",
-			slog.String("corpus_name", corpusName),
-			slog.String("err", err.Error()),
-		)
-		return
-	}
-
-	res, err := embed.Backfill(ctx, embed.BackfillOptions{
-		DB:       db,
-		Corpus:   tgt.corpus,
-		Embedder: deps.Embedder,
-		ModelID:  deps.ModelID,
-	})
-	if err != nil {
-		fields := []any{
-			slog.String("corpus_name", corpusName),
-			slog.String("err", err.Error()),
+	// Bounded inner loop: re-invoke Backfill while coverage is below
+	// the floor and the latest cycle made progress. The LEFT JOIN scan
+	// in scanPending naturally picks up rows that failed in earlier
+	// cycles (each successful insertVectorRow adds a quest_vectors row
+	// that drops out of the candidate set on the next pass).
+	var (
+		lastRes              *embed.BackfillResult
+		totalEmbedded        int
+		totalFailed          int
+		totalSkipped         int
+		finalCoverage        float64 = coverageBefore
+		dominantFailureClass string
+		capHit               bool
+	)
+	for iter := 1; iter <= backfillIterCap; iter++ {
+		res, err := embed.Backfill(ctx, embed.BackfillOptions{
+			DB:         db,
+			Corpus:     tgt.corpus,
+			Embedder:   deps.Embedder,
+			ModelID:    deps.ModelID,
+			Logger:     logger,
+			InsertHook: autoBackfillInsertHook,
+		})
+		if err != nil {
+			fields := []any{
+				slog.String("corpus_name", corpusName),
+				slog.Int("iteration", iter),
+				slog.String("err", err.Error()),
+			}
+			if res != nil {
+				fields = append(fields,
+					slog.Int("embedded", res.Embedded),
+					slog.Int("failed", res.Failed),
+					slog.Int("skipped", res.Skipped),
+				)
+			}
+			logger.Error("auto-backfill failed", fields...)
+			// Even on error, finalize the state with whatever coverage
+			// we have so the corpus is not left in 'disabled' purgatory.
+			// Any finalize error is logged inside the helper; we cannot
+			// recover further from this path.
+			_ = finalizeCorpusState(ctx, db, tgt.corpus, deps.ModelID, finalCoverage, logger)
+			return
 		}
-		if res != nil {
-			fields = append(fields,
-				slog.Int("embedded", res.Embedded),
+		if res == nil {
+			logger.Error("auto-backfill failed: nil result",
+				slog.String("corpus_name", corpusName),
+				slog.Int("iteration", iter),
+			)
+			_ = finalizeCorpusState(ctx, db, tgt.corpus, deps.ModelID, finalCoverage, logger)
+			return
+		}
+		lastRes = res
+		totalEmbedded += res.Embedded
+		totalFailed += res.Failed
+		totalSkipped += res.Skipped
+		dominantFailureClass = res.DominantFailureClass
+
+		// Recompute coverage from the live tables: the meta counters
+		// drift in the same tx as insertVectorRow so a fresh count is
+		// authoritative.
+		_, coverage, ok := assessCorpus(ctx, tgt, logger)
+		if ok {
+			finalCoverage = coverage
+		}
+
+		logger.Info("auto-backfill iteration",
+			slog.String("corpus_name", corpusName),
+			slog.Int("iteration", iter),
+			slog.Int("embedded_this_cycle", res.Embedded),
+			slog.Int("failed_this_cycle", res.Failed),
+			slog.Int("skipped_this_cycle", res.Skipped),
+			slog.Float64("coverage_after", finalCoverage),
+		)
+
+		if finalCoverage >= backfillCoverageFloor {
+			break
+		}
+		if res.Embedded == 0 {
+			// Genuine no-progress: nothing landed this cycle. Surface as
+			// WARN so the operator sees the cause rather than mistaking
+			// the silence for success (LORE-416).
+			logger.Warn("auto-backfill no progress in cycle",
+				slog.String("corpus_name", corpusName),
+				slog.Int("iteration", iter),
 				slog.Int("failed", res.Failed),
 				slog.Int("skipped", res.Skipped),
-				slog.Duration("duration", time.Since(started)),
+				slog.String("dominant_failure_class", res.DominantFailureClass),
+			)
+			break
+		}
+		if iter == backfillIterCap {
+			capHit = true
+			logger.Warn("auto-backfill iteration cap reached",
+				slog.String("corpus_name", corpusName),
+				slog.Int("cap", backfillIterCap),
+				slog.Float64("coverage_final", finalCoverage),
 			)
 		}
-		logger.Error("auto-backfill failed", fields...)
-		return
 	}
 
-	// Invariant check: res is non-nil when err is nil per Backfill's
-	// contract. Guard anyway so a future change does not turn this into
-	// a nil deref.
-	if res == nil {
-		logger.Error("auto-backfill failed: nil result",
+	// Finalize state AFTER the loop with a tri-state reason that
+	// reflects the actual outcome (LORE-411 anti-pattern fix).
+	if err := finalizeCorpusState(ctx, db, tgt.corpus, deps.ModelID, finalCoverage, logger); err != nil {
+		logger.Error("auto-backfill failed: finalize corpus state",
 			slog.String("corpus_name", corpusName),
+			slog.String("err", err.Error()),
 		)
 		return
 	}
 
-	logger.Info("auto-backfill complete",
+	// Aggregate completion line: names the dominant failure class from
+	// the last Backfill cycle so a partial-coverage finish points at the
+	// likely cause without scanning the per-iteration WARN lines.
+	completeFields := []any{
 		slog.String("corpus_name", corpusName),
-		slog.Int("encoded", res.Embedded),
-		slog.Int("skipped", res.Skipped),
-		slog.Int("failed", res.Failed),
+		slog.Int("encoded_total", totalEmbedded),
+		slog.Int("skipped_total", totalSkipped),
+		slog.Int("failed_total", totalFailed),
+		slog.Float64("coverage_final", finalCoverage),
+		slog.Bool("cap_hit", capHit),
 		slog.Duration("duration", time.Since(started)),
-		slog.Int64("epoch", res.Epoch),
-	)
+	}
+	if lastRes != nil {
+		completeFields = append(completeFields, slog.Int64("epoch", lastRes.Epoch))
+	}
+	if dominantFailureClass != "" {
+		completeFields = append(completeFields,
+			slog.String("dominant_failure_class", dominantFailureClass),
+		)
+	}
+	logger.Info("auto-backfill complete", completeFields...)
 }
 
-// ensureCorpusStateEnabled writes the corpus's embedder identity +
-// state='enabled' rows when the current state is anything other than
-// 'enabled'. No-op when the corpus is already enabled. The identity
-// copied in is the bound modelID plus the binary's current manifest
-// (tokenizer hash, runtime version, dim).
+// finalizeCorpusState writes the corpus meta identity rows and the
+// state='enabled' / state_reason rows that reflect the actual outcome
+// of the bounded inner loop. The tri-state rule (LORE-416):
 //
-// Runs inside a single BEGIN IMMEDIATE so concurrent writers serialize;
-// the five row upserts either all land or the whole promotion rolls
-// back.
-func ensureCorpusStateEnabled(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, modelID string) error {
+//   - coverage >= backfillCoverageFloor: state_reason='auto_backfill_promoted'
+//   - 0 < coverage < backfillCoverageFloor: state_reason='auto_backfill_partial'
+//   - coverage == 0: state_reason='auto_backfill_no_progress'
+//
+// The identity rows (model_id, tokenizer_hash, runtime_version, dim) are
+// written regardless of coverage; they record the embedder identity that
+// would have been used. State='enabled' regardless of coverage too: the
+// embedder IS wired, even if the backfill did not converge. The reason
+// column is the honest signal.
+//
+// When the corpus's current state is already 'enabled' (e.g. an earlier
+// `guild init` succeeded), this helper is a no-op so we do not trample
+// a more-specific state_reason from the init path. The bounded inner
+// loop can still re-invoke Backfill against an already-enabled corpus
+// to top up coverage; only the meta-write step is gated.
+func finalizeCorpusState(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, modelID string, finalCoverage float64, logger *slog.Logger) error {
 	stateKey := corpus.MetaKey(embed.FieldEmbedderState)
 	current, err := readMetaValue(ctx, db, stateKey)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", stateKey, err)
 	}
 	if current == "enabled" {
+		// Already enabled: do not overwrite a state_reason that might
+		// carry init-path provenance. The bounded inner loop already
+		// ran; meta is correct.
 		return nil
+	}
+
+	reason := stateReasonAutoBackfillPromoted
+	switch {
+	case finalCoverage >= backfillCoverageFloor:
+		reason = stateReasonAutoBackfillPromoted
+	case finalCoverage > 0:
+		reason = stateReasonAutoBackfillPartial
+	default:
+		reason = stateReasonAutoBackfillNoProgress
 	}
 
 	man := embed.CurrentManifest()
 	identity := man.Identity
-	// Fall back to the lore-side model_id if the manifest identity is
-	// incomplete. The lore provider already validated the embedder
-	// matches this modelID, so it is authoritative.
 	if identity.ModelID == "" {
 		identity.ModelID = modelID
 	}
@@ -435,7 +577,7 @@ func ensureCorpusStateEnabled(ctx context.Context, db *sql.DB, corpus embed.Vect
 
 	rows := []struct{ k, v string }{
 		{corpus.MetaKey(embed.FieldEmbedderState), "enabled"},
-		{corpus.MetaKey(embed.FieldEmbedderStateReason), "auto_backfill_promoted"},
+		{corpus.MetaKey(embed.FieldEmbedderStateReason), reason},
 		{corpus.MetaKey(embed.FieldEmbedderModelID), identity.ModelID},
 		{corpus.MetaKey(embed.FieldEmbedderTokenizerHash), identity.TokenizerHash},
 		{corpus.MetaKey(embed.FieldEmbedderRuntimeVersion), identity.RuntimeVersion},
@@ -447,7 +589,14 @@ func ensureCorpusStateEnabled(ctx context.Context, db *sql.DB, corpus embed.Vect
 			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 			kv.k, kv.v,
 		); err != nil {
-			return fmt.Errorf("upsert %s: %w", kv.k, err)
+			if logger != nil {
+				logger.Warn("auto-backfill finalize: meta upsert failed",
+					slog.String("corpus", corpus.Name()),
+					slog.String("key", kv.k),
+					slog.String("err", err.Error()),
+				)
+			}
+			return fmt.Errorf("finalize upsert %s: %w", kv.k, err)
 		}
 	}
 	return nil

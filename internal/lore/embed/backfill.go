@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strconv"
 	"time"
 )
@@ -76,6 +77,12 @@ type BackfillResult struct {
 	Failed   int
 	Duration time.Duration
 	Epoch    int64
+	// DominantFailureClass names the err_class that accumulated the most
+	// failures during this Backfill cycle (one of "encode",
+	// "embedder_disabled", "dim_mismatch", "insert_row"). Empty when
+	// Failed == 0. Surfaced by the auto-backfill summary so the operator
+	// sees the cause without scanning the per-iteration WARN lines.
+	DominantFailureClass string
 }
 
 // BackfillOptions carries the dependencies Backfill needs. Constructor
@@ -106,6 +113,18 @@ type BackfillOptions struct {
 	// ProgressEvery controls the reporting cadence: emit a progress
 	// tick every N entries (plus the final tick). Zero defaults to 10.
 	ProgressEvery int
+	// Logger receives per-iteration WARN lines that name the failure
+	// class for each row that did not embed. Nil falls back to
+	// slog.Default() so callers that do not care about the diagnostics
+	// keep working. Gated to backfillFailureLogCap entries per call so
+	// a 240-failure run does not flood the log.
+	Logger *slog.Logger
+	// InsertHook is a test seam: when non-nil, Backfill calls this in
+	// place of insertVectorRow for each pending entry. Production callers
+	// leave this nil. The shim signature mirrors insertVectorRow exactly
+	// so a fail-intermittently fixture can wrap the real call without
+	// reimplementing it.
+	InsertHook func(ctx context.Context, db *sql.DB, corpus VectorCorpus, entry PendingEntry, vec []float32, modelID string) error
 }
 
 // resolveCorpus returns opts.Corpus or the default LoreCorpus when
@@ -171,6 +190,36 @@ func ReconcileDen(ctx context.Context, db *sql.DB, corpus VectorCorpus) error {
 	return nil
 }
 
+// backfillFailureLogCap is the maximum number of per-iteration WARN
+// lines Backfill emits before suppressing the rest with a single
+// "[N more failures suppressed]" summary. 10 is enough to characterize
+// the dominant cause without flooding stderr on a 240-failure run.
+const backfillFailureLogCap = 10
+
+// failureClassEncode tags a failure where Embedder.Embed returned an
+// error other than ErrEmbedderDisabled.
+const failureClassEncode = "encode"
+
+// failureClassEmbedderDisabled tags the ErrEmbedderDisabled short-circuit.
+const failureClassEmbedderDisabled = "embedder_disabled"
+
+// failureClassDimMismatch tags a vector whose length did not match Dim.
+const failureClassDimMismatch = "dim_mismatch"
+
+// failureClassInsertRow tags a DB-side failure inside insertVectorRow
+// (typically BEGIN IMMEDIATE retry exhaustion under writer-lock
+// contention; LORE-416).
+const failureClassInsertRow = "insert_row"
+
+// truncateErr clips an error message to maxLen characters so a
+// pathological driver-wrapped string does not blow the log line out.
+func truncateErr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
+}
+
 // Backfill embeds every pending entry and writes a row into lore_vectors
 // for each. Idempotent on re-run: the candidate scan is a LEFT JOIN that
 // already excludes rows that have vectors, so a second Backfill against
@@ -192,6 +241,10 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 	}
 	if opts.ProgressEvery <= 0 {
 		opts.ProgressEvery = 10
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 	corpus := opts.resolveCorpus()
 
@@ -222,6 +275,23 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 	}
 
 	renderProgress := opts.ProgressOut != nil && opts.ProgressOut != io.Discard && res.Total >= opts.ProgressThreshold
+
+	// Per-iteration failure diagnostics: track counts per err_class for
+	// the dominant-class summary, and gate the WARN emit at
+	// backfillFailureLogCap so a 240-failure run does not flood logs.
+	failureCounts := map[string]int{}
+	failureLogCount := 0
+	suppressedCount := 0
+	logFailure := func(class string, fields ...any) {
+		failureCounts[class]++
+		if failureLogCount < backfillFailureLogCap {
+			logger.Warn("embed: Backfill: per-entry failure", fields...)
+			failureLogCount++
+		} else {
+			suppressedCount++
+		}
+	}
+
 	for i, entry := range pending {
 		if err := ctx.Err(); err != nil {
 			return res, fmt.Errorf("embed: Backfill: cancelled: %w", err)
@@ -232,21 +302,52 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 			// other error is a per-entry transient. Both bump Failed.
 			res.Failed++
 			if errors.Is(encErr, ErrEmbedderDisabled) {
+				logFailure(failureClassEmbedderDisabled,
+					slog.Int64("entry_id", entry.ID),
+					slog.String("err_class", failureClassEmbedderDisabled),
+					slog.String("err", truncateErr(encErr.Error(), 200)),
+				)
 				// Short-circuit: no point continuing against a null
 				// embedder (the remaining rows will all fail the same
 				// way). Return what we have so the caller can set
 				// meta.embedder_state='disabled' and move on.
 				res.Duration = time.Since(start)
+				res.DominantFailureClass = pickDominantClass(failureCounts)
+				if suppressedCount > 0 {
+					logger.Warn("embed: Backfill: more per-entry failures suppressed",
+						slog.Int("suppressed", suppressedCount),
+					)
+				}
 				return res, fmt.Errorf("embed: Backfill: embedder disabled: %w", encErr)
 			}
+			logFailure(failureClassEncode,
+				slog.Int64("entry_id", entry.ID),
+				slog.String("err_class", failureClassEncode),
+				slog.String("err", truncateErr(encErr.Error(), 200)),
+			)
 			continue
 		}
 		if len(vec) != Dim {
 			res.Failed++
+			logFailure(failureClassDimMismatch,
+				slog.Int64("entry_id", entry.ID),
+				slog.String("err_class", failureClassDimMismatch),
+				slog.Int("got", len(vec)),
+				slog.Int("want", Dim),
+			)
 			continue
 		}
-		if err := insertVectorRow(ctx, opts.DB, corpus, entry, vec, opts.ModelID); err != nil {
+		insertFn := opts.InsertHook
+		if insertFn == nil {
+			insertFn = insertVectorRow
+		}
+		if err := insertFn(ctx, opts.DB, corpus, entry, vec, opts.ModelID); err != nil {
 			res.Failed++
+			logFailure(failureClassInsertRow,
+				slog.Int64("entry_id", entry.ID),
+				slog.String("err_class", failureClassInsertRow),
+				slog.String("err", truncateErr(err.Error(), 200)),
+			)
 			// DB-level error on a single row: keep going. A second run
 			// of Backfill will pick the row up again via LEFT JOIN.
 			continue
@@ -260,6 +361,12 @@ func Backfill(ctx context.Context, opts BackfillOptions) (*BackfillResult, error
 			})
 		}
 	}
+	if suppressedCount > 0 {
+		logger.Warn("embed: Backfill: more per-entry failures suppressed",
+			slog.Int("suppressed", suppressedCount),
+		)
+	}
+	res.DominantFailureClass = pickDominantClass(failureCounts)
 	res.Skipped = res.Total - res.Embedded - res.Failed
 	epoch, err := bumpEpoch(ctx, opts.DB, corpus)
 	if err != nil {
@@ -394,6 +501,16 @@ func scanPending(ctx context.Context, db *sql.DB, corpus VectorCorpus) ([]Pendin
 		out = append(out, PendingEntry{ID: id, Summary: text})
 	}
 	return out, nil
+}
+
+// InsertVectorRow is the test-visible shim around insertVectorRow.
+// Production code calls insertVectorRow directly; tests that want to
+// inject a fail-intermittently or counting wrapper assign a closure to
+// BackfillOptions.InsertHook that delegates to InsertVectorRow on the
+// happy path. Exported only so internal/mcp tests can reach it without
+// duplicating the BEGIN IMMEDIATE / quantize logic.
+func InsertVectorRow(ctx context.Context, db *sql.DB, corpus VectorCorpus, entry PendingEntry, vec []float32, modelID string) error {
+	return insertVectorRow(ctx, db, corpus, entry, vec, modelID)
 }
 
 // insertVectorRow writes one row into the corpus's vector table for
@@ -589,6 +706,25 @@ func beginImmediateLocal(ctx context.Context, db *sql.DB, op string) (*sql.Conn,
 // and wraps errors into fmt.Errorf("%w", ...).
 func isSQLiteBusy(msg string) bool {
 	return containsAny(msg, "SQLITE_BUSY", "database is locked", "SQLITE_LOCKED")
+}
+
+// pickDominantClass returns the err_class with the highest count, or "" if
+// the map is empty. Ties resolve to the alphabetically first class so the
+// output is deterministic across runs (the dominant-class line is read by
+// operators, not by code; stability beats novelty here).
+func pickDominantClass(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	best := ""
+	bestN := -1
+	for class, n := range counts {
+		if n > bestN || (n == bestN && class < best) {
+			best = class
+			bestN = n
+		}
+	}
+	return best
 }
 
 func containsAny(s string, needles ...string) bool {
