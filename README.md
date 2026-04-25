@@ -201,6 +201,11 @@ State lives in SQLite under `~/.guild/`. Switching MCP clients requires no expor
 See [AGENTS.md](./AGENTS.md) for the agent-facing contributor contract
 and [CONTRIBUTING.md](./CONTRIBUTING.md) for the human-facing workflow.
 
+Maintainers shipping releases that embed the int8 ONNX retrieval
+model: see [docs/MODEL.md](./docs/MODEL.md) for the two-workflow build
+pattern (model production vs binary release), the `.model-version`
+pin, and the rebuild cadence.
+
 ---
 
 ## 📄 License

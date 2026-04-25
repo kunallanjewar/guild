@@ -183,9 +183,30 @@ docs-check: $(BIN_DIR) ## Verify docs/generated/* is up to date (CI gate)
 
 ##@ Assets
 
-# Source of truth for the model + vocab is the Phase 1 spike workspace.
-# Override ASSETS_SPIKE_DIR on the CLI to point at a different staging area.
+# Source of truth for the model + vocab.
+#
+# Two paths, in priority order:
+#
+#   1. ASSETS_SPIKE_DIR (env var). When set AND $(ASSETS_SPIKE_DIR)/model.onnx
+#      exists, assets-model copies from there. Preserves the dev workflow
+#      against the spike repo and the release.yml staging dir flow.
+#
+#   2. .model-version + GitHub Release. When ASSETS_SPIKE_DIR is unset or
+#      the staged file is missing, assets-model reads .model-version and
+#      downloads the pinned model-v<semver> release into a local cache
+#      under .cache/model-v<version>/. Subsequent runs hit the cache.
+#
+# The spike-dir default below stays as a fallback so contributors with a
+# local spike checkout keep their fast path; when the directory is absent
+# the new download path takes over automatically.
 ASSETS_SPIKE_DIR ?= ../lares-spikes/guild-embedding-purego/workspace/models/bge-small-int8
+
+# Pinned model release tag. Bumping this is a deliberate maintainer PR
+# (see docs/MODEL.md). The build-model workflow produces the matching
+# model-v<MODEL_VERSION> GitHub Release.
+MODEL_VERSION := $(shell cat .model-version 2>/dev/null | tr -d '[:space:]')
+MODEL_REPO    ?= mathomhaus/guild
+MODEL_CACHE   := .cache/model-v$(MODEL_VERSION)
 
 # Per-platform asset root.
 ASSETS_DIR := internal/lore/embed/assets
@@ -205,15 +226,46 @@ assets: ## Stage per-platform embedded runtime assets (model, vocab, libonnxrunt
 	@echo "✓ assets staged under $(ASSETS_DIR)"
 
 .PHONY: assets-model
-assets-model: ## Copy model.onnx + vocab.txt into every platform subdir
-	@if [ ! -f $(ASSETS_SPIKE_DIR)/model.onnx ]; then \
-	  echo "✗ $(ASSETS_SPIKE_DIR)/model.onnx missing; set ASSETS_SPIKE_DIR"; exit 1; \
-	fi
-	@for triple in darwin_arm64 darwin_amd64 linux_amd64 linux_arm64; do \
-	  cp $(ASSETS_SPIKE_DIR)/model.onnx $(ASSETS_DIR)/$$triple/model.onnx; \
-	  cp $(ASSETS_SPIKE_DIR)/vocab.txt  $(ASSETS_DIR)/$$triple/vocab.txt; \
+assets-model: ## Copy model.onnx + vocab.txt into every platform subdir (uses ASSETS_SPIKE_DIR if staged, else downloads pinned model release)
+	@src=""; \
+	if [ -f "$(ASSETS_SPIKE_DIR)/model.onnx" ] && [ -f "$(ASSETS_SPIKE_DIR)/vocab.txt" ]; then \
+	  src="$(ASSETS_SPIKE_DIR)"; \
+	  echo "  using staged assets at $$src"; \
+	else \
+	  if [ -z "$(MODEL_VERSION)" ]; then \
+	    echo "✗ no .model-version and ASSETS_SPIKE_DIR is unset / incomplete"; \
+	    echo "  fix: either set ASSETS_SPIKE_DIR=<dir-with-model.onnx-and-vocab.txt>"; \
+	    echo "       or add a .model-version file at the repo root"; \
+	    exit 1; \
+	  fi; \
+	  if [ ! -f "$(MODEL_CACHE)/model.onnx" ] || [ ! -f "$(MODEL_CACHE)/vocab.txt" ]; then \
+	    command -v gh >/dev/null || { echo "✗ gh CLI not found on PATH"; \
+	      echo "  fix: install gh (https://cli.github.com) or set ASSETS_SPIKE_DIR to a local staging dir"; exit 1; }; \
+	    mkdir -p "$(MODEL_CACHE)"; \
+	    echo "  downloading model-v$(MODEL_VERSION) from $(MODEL_REPO) into $(MODEL_CACHE)/"; \
+	    gh release download "model-v$(MODEL_VERSION)" \
+	      --repo "$(MODEL_REPO)" \
+	      --pattern model.onnx \
+	      --pattern vocab.txt \
+	      --pattern tokenizer.json \
+	      --dir "$(MODEL_CACHE)" \
+	      || { echo "✗ gh release download failed"; \
+	           echo "  fix: run 'gh auth login' or set ASSETS_SPIKE_DIR to a local staging dir"; exit 1; }; \
+	  else \
+	    echo "  cache hit: $(MODEL_CACHE)"; \
+	  fi; \
+	  src="$(MODEL_CACHE)"; \
+	fi; \
+	for triple in darwin_arm64 darwin_amd64 linux_amd64 linux_arm64; do \
+	  cp "$$src/model.onnx" $(ASSETS_DIR)/$$triple/model.onnx; \
+	  cp "$$src/vocab.txt"  $(ASSETS_DIR)/$$triple/vocab.txt; \
 	done
 	@echo "✓ model + vocab staged"
+
+.PHONY: assets-model-clean
+assets-model-clean: ## Remove the .cache/model-v* dirs (forces re-download on next assets-model)
+	@rm -rf .cache/model-v*
+	@echo "✓ model cache cleaned"
 
 .PHONY: assets-runtime
 assets-runtime: ## Download libonnxruntime per-platform from the ORT GitHub release

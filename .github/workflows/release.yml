@@ -75,22 +75,30 @@ jobs:
         with:
           cosign-release: 'v2.4.3'
 
-      # Stage the model + vocab for all platforms. model.onnx and vocab.txt are
-      # stored as GitHub Actions secrets (base64-encoded) because they are too
-      # large to commit to the repo. GUILD_MODEL_B64 and GUILD_VOCAB_B64 must be
-      # set in repo Settings -> Secrets -> Actions.
+      # Stage the model + vocab for all platforms. The pinned model release
+      # tag lives in .model-version at the repo root; this step downloads
+      # the corresponding model-v<semver> GitHub Release assets via gh CLI
+      # using the default GITHUB_TOKEN (Contents:read on same-repo releases
+      # is sufficient, no new secret needed). assets-model picks up the
+      # staged files via ASSETS_SPIKE_DIR and copies them per-platform.
+      # See .github/workflows/build-model.yml for how the model release is
+      # produced and recipe/README.md for the broader two-workflow pattern.
       # The ORT shared libraries are downloaded by goreleaser's before.hooks
       # (make assets-runtime) from the ORT GitHub release; no secret needed for them.
-      - name: Stage model assets
+      - name: Stage model assets from pinned release
         env:
-          GUILD_MODEL_B64: ${{ secrets.GUILD_MODEL_B64 }}
-          GUILD_VOCAB_B64: ${{ secrets.GUILD_VOCAB_B64 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for triple in darwin_arm64 darwin_amd64 linux_amd64 linux_arm64; do
-            mkdir -p internal/lore/embed/assets/${triple}
-            printf '%s' "${GUILD_MODEL_B64}" | base64 -d > internal/lore/embed/assets/${triple}/model.onnx
-            printf '%s' "${GUILD_VOCAB_B64}" | base64 -d > internal/lore/embed/assets/${triple}/vocab.txt
-          done
+          set -euo pipefail
+          VERSION=$(tr -d '[:space:]' < .model-version)
+          mkdir -p workspace/staging
+          gh release download "model-v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern model.onnx \
+            --pattern vocab.txt \
+            --pattern tokenizer.json \
+            --dir workspace/staging
+          ASSETS_SPIKE_DIR=workspace/staging make assets-model
 
       # goreleaser-action v6 supports goreleaser v2 natively.
       # CGO_ENABLED=0 is set in .goreleaser.yml; repeating it here is
