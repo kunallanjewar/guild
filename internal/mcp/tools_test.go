@@ -600,7 +600,7 @@ func TestSessionStartNoStub(t *testing.T) {
 	}
 	// Body must at least include the active-project narration AND
 	// either briefing/oath/top-task structure or the graceful fallback.
-	if !strings.Contains(body, "active project set") {
+	if !strings.Contains(body, "active project:") {
 		t.Errorf("missing narration header: %q", body)
 	}
 	// Either of these indicates the Bounties wiring ran: actual payload
