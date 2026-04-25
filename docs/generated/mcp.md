@@ -2,7 +2,7 @@
 
 # guild MCP tool catalog
 
-Every tool a registered MCP client sees. 42 tools.
+Every tool a registered MCP client sees. 43 tools.
 
 ## Tools
 
@@ -27,6 +27,7 @@ Every tool a registered MCP client sees. 42 tools.
 - [`lore_ripples`](#lore_ripples) — Walk the provenance graph from a seed entry via entry_links.
 - [`lore_seal`](#lore_seal) — Seal (archive) an entry from active circulation.
 - [`lore_study`](#lore_study) — Get full detail of one entry: summary, metadata, linked entries.
+- [`lore_unlink`](#lore_unlink) — Remove an informs (or supersedes/contradicts) edge from the provenance graph.
 - [`lore_update`](#lore_update) — Edit an entry's title, status, tags, kind, topic, or summary.
 - [`lore_whispers`](#lore_whispers) — List lore entries in the idea pipeline — entries with kind=idea and an early status.
 - [`quest_accept`](#quest_accept) — Atomically claim a quest so two agents do not take the same work, then return the current spec and recent state.
@@ -736,6 +737,52 @@ _no arguments_
   },
   "required": [
     "entry_id"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `lore_unlink`
+
+Remove an informs (or supersedes/contradicts) edge from the provenance graph. Idempotent: removing a non-existent edge returns success with a 'no matching edge' note.
+
+_no arguments_
+
+<details><summary>Raw JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "from_id": {
+      "description": "source entry id",
+      "pattern": "^-?[0-9]+$",
+      "type": [
+        "integer",
+        "string"
+      ]
+    },
+    "project": {
+      "type": "string"
+    },
+    "relation": {
+      "description": "informs|supersedes|contradicts (default informs)",
+      "type": "string"
+    },
+    "to_id": {
+      "description": "target entry id (the one that was being informed by from)",
+      "pattern": "^-?[0-9]+$",
+      "type": [
+        "integer",
+        "string"
+      ]
+    }
+  },
+  "required": [
+    "from_id",
+    "to_id"
   ],
   "type": "object"
 }

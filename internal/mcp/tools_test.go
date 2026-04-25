@@ -34,6 +34,7 @@ var expectedTools = []struct {
 	{"lore_inquest"},
 	{"lore_inscribe"},
 	{"lore_link"},
+	{"lore_unlink"},
 	{"lore_list"},
 	{"lore_meld"},
 	{"lore_oath"},
@@ -599,7 +600,7 @@ func TestSessionStartNoStub(t *testing.T) {
 	}
 	// Body must at least include the active-project narration AND
 	// either briefing/oath/top-task structure or the graceful fallback.
-	if !strings.Contains(body, "active project set") {
+	if !strings.Contains(body, "active project:") {
 		t.Errorf("missing narration header: %q", body)
 	}
 	// Either of these indicates the Bounties wiring ran: actual payload
@@ -709,6 +710,8 @@ func minArgsFor(name string) map[string]any {
 		return map[string]any{"dir": "/tmp/none"}
 	case "lore_link":
 		return map[string]any{"from_id": 1, "to_id": 2}
+	case "lore_unlink":
+		return map[string]any{"from_id": 1, "to_id": 2}
 	case "lore_ripples":
 		return map[string]any{"entry_id": "1"}
 	case "quest_post":
@@ -785,6 +788,8 @@ func smokeArgsFor(name string) map[string]any {
 	case "lore_catalog":
 		return map[string]any{"dir": "/tmp/guild-no-such-dir-xyz", "project": "testproj"}
 	case "lore_link":
+		return map[string]any{"from_id": 999998, "to_id": 999999, "project": "testproj"}
+	case "lore_unlink":
 		return map[string]any{"from_id": 999998, "to_id": 999999, "project": "testproj"}
 	case "lore_inquest":
 		return base

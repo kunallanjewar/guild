@@ -93,7 +93,7 @@ func TestRenderBounties_HealthyEmbedderNoLine(t *testing.T) {
 
 	// With lore DB unreachable, renderBounties still works (graceful degradation)
 	// and no embedder line appears.
-	body := renderBounties(ctx, "test-proj", false)
+	body, _ := renderBounties(ctx, "test-proj", false)
 	if strings.Contains(body, "embedder:") {
 		t.Errorf("healthy/unreachable lore DB should not produce an embedder line; got body=%q", body)
 	}
@@ -182,7 +182,7 @@ INSERT OR REPLACE INTO meta (key, value) VALUES
 	)
 	_ = questDB.Close()
 
-	body := renderBounties(ctx, "test", false)
+	body, _ := renderBounties(ctx, "test", false)
 
 	// The embedder is disabled, so the line "embedder: disabled" must appear.
 	if !strings.Contains(body, "embedder: disabled") {

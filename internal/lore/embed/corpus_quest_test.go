@@ -283,6 +283,128 @@ func TestQuestCorpus_LSP(t *testing.T) {
 	}
 }
 
+// TestQuestCorpus_Migration006_BackfillsHistoricalRows is the QUEST-246
+// regression gate. Reproduces the LORE-404 reproducer at fixture scale:
+// 200 task_status rows that were never auto-bridged by the
+// tasks_fts_status_ai trigger (the historical-data condition migration
+// 005 left on every upgrading install) must end up bridged in
+// tasks_fts_rows after the migration-006 backfill SQL runs.
+//
+// Approach: open a fully-migrated DB (so all of 001-006 is on disk),
+// drop the auto-bridge trigger, seed 200 task_status rows that bypass
+// the trigger, delete any tasks_fts_rows entries the seeded ids may
+// alias, then re-execute the migration-006 SQL directly. The migration
+// SQL is idempotent (INSERT OR IGNORE on bridge, UPDATE WHERE body=” on
+// body) so re-running against an already-migrated DB is the documented
+// safe path.
+func TestQuestCorpus_Migration006_BackfillsHistoricalRows(t *testing.T) {
+	ctx := context.Background()
+	db := openEmbedTestDB(t)
+
+	// Drop the trigger so the seeded task_status rows below do not auto-
+	// bridge. This simulates pre-005 historical data: rows existed long
+	// before the trigger did, so the trigger never fired against them.
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER IF EXISTS tasks_fts_status_ai`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+
+	const seedCount = 200
+	for i := 1; i <= seedCount; i++ {
+		taskID := "QUEST-246-" + intStr(i)
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO task_status (project_id, task_id, status) VALUES ('p', ?, 'next')`,
+			taskID,
+		); err != nil {
+			t.Fatalf("seed task_status %s: %v", taskID, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO task_notes (project_id, task_id, agent_id, note)
+			 VALUES ('p', ?, 'test', '[spec] subject: historical quest body for migration 006 test')`,
+			taskID,
+		); err != nil {
+			t.Fatalf("seed task_notes %s: %v", taskID, err)
+		}
+	}
+
+	// Sanity precondition: tasks_fts_rows is still empty for these test
+	// rows (the trigger was dropped before the inserts ran).
+	var preBridge int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks_fts_rows WHERE task_id LIKE 'QUEST-246-%'`,
+	).Scan(&preBridge); err != nil {
+		t.Fatalf("pre count: %v", err)
+	}
+	if preBridge != 0 {
+		t.Fatalf("precondition violated: %d historical bridge rows already present; test cannot exercise 006", preBridge)
+	}
+
+	// Re-execute the migration-006 backfill SQL. Idempotent by design.
+	const migration006SQL = `
+		INSERT OR IGNORE INTO tasks_fts_rows (task_id)
+		SELECT DISTINCT task_id FROM task_status;
+	`
+	if _, err := db.ExecContext(ctx, migration006SQL); err != nil {
+		t.Fatalf("re-run migration 006 INSERT: %v", err)
+	}
+	const migration006BodySQL = `
+		UPDATE tasks_fts_rows
+		SET body = COALESCE((
+		  SELECT group_concat(tn.note, ' ')
+		  FROM task_notes tn
+		  WHERE tn.task_id = tasks_fts_rows.task_id
+		    AND tn.note LIKE '[spec]%'
+		), '')
+		WHERE body = '';
+	`
+	if _, err := db.ExecContext(ctx, migration006BodySQL); err != nil {
+		t.Fatalf("re-run migration 006 UPDATE: %v", err)
+	}
+
+	// Post-migration assertions.
+	corpus := QuestCorpus{}
+	activePred := corpus.ActivePredicate()
+	if activePred == "" {
+		activePred = "1=1"
+	}
+	denQuery := `SELECT COUNT(*) FROM ` + corpus.EntityTable() + ` WHERE ` + activePred
+	var den int64
+	if err := db.QueryRowContext(ctx, denQuery).Scan(&den); err != nil {
+		t.Fatalf("post-migration den count: %v", err)
+	}
+	if den < int64(seedCount) {
+		t.Errorf("QuestCorpus effective entity count after migration 006: got %d, want >= %d", den, seedCount)
+	}
+
+	// Body backfill assertion: every newly bridged test row must have a
+	// non-empty body (its concatenated [spec] notes).
+	var emptyBodies int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM tasks_fts_rows
+		WHERE task_id LIKE 'QUEST-246-%' AND body = ''
+	`).Scan(&emptyBodies); err != nil {
+		t.Fatalf("count empty bodies: %v", err)
+	}
+	if emptyBodies > 0 {
+		t.Errorf("migration 006 left %d historical bridge rows with empty bodies; expected 0", emptyBodies)
+	}
+}
+
+// intStr is a small itoa helper so this test file does not pull in
+// strconv for one call.
+func intStr(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
 // TestQuestCorpus_SourceText verifies that SourceText assembles the spec
 // note payloads for a quest and returns sql.ErrNoRows for a missing quest.
 func TestQuestCorpus_SourceText(t *testing.T) {

@@ -1,7 +1,20 @@
 // QuestCorpus is the VectorCorpus adapter for the quest tasks schema.
-// Maps every port accessor to the schema shipped in migration 005:
-// vectors in quest_vectors, entities in tasks_fts_rows (integer-ID
-// bridge), body column carries concatenated spec notes for embedding.
+// Maps every port accessor to the schema shipped in migration 005 plus
+// the data backfill in migration 006: vectors in quest_vectors, entities
+// in tasks_fts_rows (integer-ID bridge, one row per distinct
+// task_status.task_id post-006), body column carries concatenated spec
+// notes for embedding.
+//
+// Migration 006 (QUEST-246, LORE-404) is the load-bearing piece: it
+// backfills tasks_fts_rows from every distinct task_status.task_id and
+// reconstitutes body from each quest's [spec] task_notes. Before 006,
+// only quests posted after migration 005 applied were bridged (the
+// tasks_fts_status_ai trigger fires on INSERT only and never ran against
+// historical rows), so on upgrading installs tasks_fts_rows held a tiny
+// fraction of real quests and embeddings silently skipped 96% of the
+// corpus. Post-006, COUNT(*) FROM tasks_fts_rows equals COUNT(DISTINCT
+// task_id) FROM task_status, and QuestCorpus's effective entity surface
+// matches the canonical quest store.
 //
 // MetaKey returns 'quest.'-prefixed keys so two corpora sharing a
 // single meta table never collide on rows (lore owns the unprefixed
@@ -13,8 +26,9 @@
 // predicate in scans when VectorStateColumn() returns the empty string.
 //
 // ActivePredicate: all bridge rows are eligible for embedding (no
-// archive/park lifecycle on quests today). Returns "1=1" which the
-// algorithms accept as a pass-through WHERE fragment.
+// archive/park lifecycle on quests today). Returns "id IS NOT NULL"
+// which the algorithms accept as a pass-through WHERE fragment after
+// prefixing the table alias.
 
 package embed
 

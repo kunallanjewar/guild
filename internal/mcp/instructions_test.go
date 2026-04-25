@@ -23,10 +23,10 @@ import (
 // direct edits to instructions.md do. See QUEST-57 for the dynamic
 // build path and its separate tests.
 //
-// Last updated for QUEST-224: added quest_search(query=...) to the
+// Last updated for QUEST-243: added lore_unlink(from_id=..., to_id=...) to the
 // canonical invocation examples section so doc-coverage passes for the
-// new BM25+vector quest search tool (LORE-377).
-const wantStaticSHA = "a16af9601ed3e17e2aeff07dad7e3b39a94c7a4dc149443ffcd3a619e1c9b396"
+// new provenance edge removal tool (LORE-401).
+const wantStaticSHA = "3612ee1770080d0382887a60530cc138f90d26d2974ed434feeeb6f3c419d7e4"
 
 func TestStaticInstructions_Embedded(t *testing.T) {
 	if staticInstructions == "" {

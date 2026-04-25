@@ -138,10 +138,10 @@ func handleSessionStart(
 	// Narrate the state change inline so the host's collapsed-MCP UX
 	// doesn't hide it from the user. When the worktree fallback fired,
 	// append a suffix so the agent and user see how the project was
-	// resolved (worktree cwd → main-repo path → project registration).
-	header := fmt.Sprintf("[active project set to %q]", name)
+	// resolved (worktree cwd to main-repo path to project registration).
+	header := fmt.Sprintf("📍 active project: %s", name)
 	if viaWorktreeFallback {
-		header += " — inferred from worktree's main-repo path"
+		header += " (inferred from worktree's main-repo path)"
 	}
 
 	// Try to load the bounties snapshot. Graceful-degradation: if the
@@ -152,27 +152,38 @@ func handleSessionStart(
 	// renderBounties always returns a non-empty structural block:
 	// section headers render even on an empty project so first-time
 	// users see the shape (QUEST-1).
-	body := renderBounties(ctx, name, false /* briefOnly */)
+	body, bountiesRes := renderBounties(ctx, name, false /* briefOnly */)
 	if body == "" {
 		body = emptyBountiesSkeleton()
 	}
 
-	full := header + "\n\n" + body
+	// Board-summary line: counts at a glance for Codex-class collapsed views.
+	var boardLine string
+	if bountiesRes != nil {
+		oathCount := len(bountiesRes.Oath)
+		bountyCount := len(bountiesRes.AllNext)
+		echoCount := len(bountiesRes.Echoes)
+		boardLine = fmt.Sprintf("📊 board: %d oaths, %d bounties, %d echoes\n", oathCount, bountyCount, echoCount)
+	}
+
+	full := header + "\n" + boardLine + "\n" + body
 	respBytes = uint(len(full))
 	return textResult(full), nil, nil
 }
 
 // renderBounties loads the briefing + oath + top task for projectID
-// and returns a compact text block. Empty string when no data is
-// available — caller supplies a friendly fallback.
+// and returns a compact text block plus the raw BountiesResult so the
+// caller can inspect counts (oaths, bounties, echoes) without a second
+// DB round-trip. Both return values are nil/empty when no data is
+// available; the caller supplies a friendly fallback.
 //
 // Failures are swallowed: bootstrap should never hard-error on a cold
 // DB, because the agent's recovery path (init the project) depends on
 // reaching the post-bootstrap tool surface.
-func renderBounties(ctx context.Context, projectID string, briefOnly bool) string {
+func renderBounties(ctx context.Context, projectID string, briefOnly bool) (string, *quest.BountiesResult) {
 	questDB, err := openQuestDB(ctx)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	defer func() { _ = questDB.Close() }()
 
@@ -220,7 +231,7 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 	if err != nil {
 		// Project not registered yet, or no quests posted: degrade
 		// cleanly rather than bubbling a bootstrap failure.
-		return ""
+		return "", nil
 	}
 	body := formatBounties(res, briefOnly)
 	if embedderHealthLine != "" {
@@ -232,7 +243,7 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) strin
 	if nudge := release.CheckAndNudgeMCP(ctx, binaryVersion); nudge != "" {
 		body += "\n" + nudge + "\n"
 	}
-	return body
+	return body, res
 }
 
 // formatBounties renders a BountiesResult as the text block the

@@ -33,8 +33,10 @@ const (
 	// were added -- net +~182 tokens for the two embedder health tools.
 	// Raised to 5100 in QUEST-224 when quest_search was added -- net
 	// +~124 tokens for the BM25+vector quest search tool.
-	// Expected actual: ~4950 tokens.
-	totalMaxTokens = 5100
+	// Raised to 5300 in QUEST-243 when lore_unlink was added -- net
+	// +~154 tokens for the provenance edge removal tool.
+	// Expected actual: ~5106 tokens.
+	totalMaxTokens = 5300
 )
 
 // TestDescriptionBudget enforces the token budgets against the full
