@@ -189,6 +189,7 @@ The MCP host collapses tool results in chat — the user sees `Called guild (ctr
 - `lore_inscribe` → "📜 inscribed LORE-XXX: <short title>"
 - `lore_reforge` → "🔨 reforged LORE-OLD → LORE-NEW"
 - `lore_link` → "🔗 linked LORE-A informs LORE-B"
+- `lore_unlink` → "🔗 unlinked LORE-A informs LORE-B" (or "no matching edge" on idempotent call)
 - `quest_post` → "➕ posted QUEST-X: <subject>"
 - `quest_accept` → "⚔️ accepted QUEST-X"
 - `quest_clear` → "🏆 cleared QUEST-X — <one-line result>"
@@ -225,6 +226,7 @@ Use these shapes when you need a concrete schema:
   lore_seal(entry_id=34)
   lore_catalog(dir="/abs/path/docs")
   lore_link(from_id=34, to_id=56, relation="informs")
+  lore_unlink(from_id=34, to_id=56, relation="informs")
   lore_echoes()
   lore_whispers(topic="auth")
   lore_ripples(entry_id=34, depth=3, direction="out")

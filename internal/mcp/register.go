@@ -114,6 +114,7 @@ func registerAlwaysOn(s *sdkmcp.Server) {
 	lore.EchoesCommand.BindMCP(s, loreDeps)
 	lore.WhispersCommand.BindMCP(s, loreDeps)
 	lore.LinkCommand.BindMCP(s, loreDeps)    // provenance graph — write half
+	lore.UnlinkCommand.BindMCP(s, loreDeps)  // provenance graph — remove edge
 	lore.RipplesCommand.BindMCP(s, loreDeps) // provenance graph — read half
 	// --- lore (hygiene) ---
 	lore.InquestCommand.BindMCP(s, loreDeps)
