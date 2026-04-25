@@ -353,6 +353,22 @@ const (
 	stateReasonAutoBackfillNoProgress = "auto_backfill_no_progress"
 )
 
+// isAutoBackfillReason returns true when the given state_reason was written
+// by the auto-backfill path (as opposed to an external init path). The
+// finalizeCorpusState gate uses this to distinguish "safe to refresh"
+// (auto-backfill managed, QUEST-253) from "preserve unchanged" (init-path
+// or operator-set provenance).
+func isAutoBackfillReason(reason string) bool {
+	switch reason {
+	case stateReasonAutoBackfillPromoted,
+		stateReasonAutoBackfillPartial,
+		stateReasonAutoBackfillNoProgress:
+		return true
+	default:
+		return false
+	}
+}
+
 // runOneCorpusBackfill encodes one corpus end-to-end with a bounded
 // inner loop (LORE-416 / QUEST-248): re-invoke embed.Backfill until
 // coverage clears the floor, no progress is observed in the latest
@@ -538,11 +554,15 @@ func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lor
 // embedder IS wired, even if the backfill did not converge. The reason
 // column is the honest signal.
 //
-// When the corpus's current state is already 'enabled' (e.g. an earlier
-// `guild init` succeeded), this helper is a no-op so we do not trample
-// a more-specific state_reason from the init path. The bounded inner
-// loop can still re-invoke Backfill against an already-enabled corpus
-// to top up coverage; only the meta-write step is gated.
+// Gate semantics (QUEST-253): when the corpus's current state is already
+// 'enabled', the behavior depends on the existing state_reason:
+//   - Non-auto-backfill reason (e.g. 'init_path_custom'): no-op. Preserves
+//     init-path or operator-set provenance.
+//   - Auto-backfill reason AND coverage >= backfillCoverageFloor AND reason
+//     is already 'auto_backfill_promoted': no-op. Already converged.
+//   - Auto-backfill reason with stale coverage (e.g. state was promoted on a
+//     prior partial run but coverage is still below the floor): fall through
+//     and write the new state_reason so meta honestly reflects the outcome.
 func finalizeCorpusState(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, modelID string, finalCoverage float64, logger *slog.Logger) error {
 	stateKey := corpus.MetaKey(embed.FieldEmbedderState)
 	current, err := readMetaValue(ctx, db, stateKey)
@@ -550,10 +570,19 @@ func finalizeCorpusState(ctx context.Context, db *sql.DB, corpus embed.VectorCor
 		return fmt.Errorf("read %s: %w", stateKey, err)
 	}
 	if current == "enabled" {
-		// Already enabled: do not overwrite a state_reason that might
-		// carry init-path provenance. The bounded inner loop already
-		// ran; meta is correct.
-		return nil
+		reason, _ := readMetaValue(ctx, db, corpus.MetaKey(embed.FieldEmbedderStateReason))
+		// Preserve init-path or external provenance: do not trample if
+		// reason is not auto-backfill-managed (QUEST-253 gate semantics).
+		if !isAutoBackfillReason(reason) {
+			return nil
+		}
+		// Healthy: previously promoted AND coverage cleared the floor. No refresh needed.
+		if reason == stateReasonAutoBackfillPromoted && finalCoverage >= backfillCoverageFloor {
+			return nil
+		}
+		// Else: auto-backfill-managed AND (stale promoted with low coverage
+		// OR previous partial/no_progress reason). Fall through to write the
+		// new state_reason so meta honestly reflects the latest outcome.
 	}
 
 	reason := stateReasonAutoBackfillPromoted

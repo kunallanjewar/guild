@@ -1026,6 +1026,115 @@ func seedQuestSilentSuccessShape(t *testing.T, path string, bigStatusCount, fewB
 	}
 }
 
+// TestFinalizeCorpusState_RefreshesStaleAutoBackfillPromoted is the QUEST-253
+// regression gate for the stuck-state shape: a corpus already at
+// state=enabled with state_reason=auto_backfill_promoted but coverage well
+// below the floor (the maintainer's real install: 9/247 = 3.6%). The refined
+// gate must fall through and flip state_reason to auto_backfill_partial so
+// the operator can triage instead of seeing a falsely-promoted corpus.
+func TestFinalizeCorpusState_RefreshesStaleAutoBackfillPromoted(t *testing.T) {
+	tmp := t.TempDir()
+	questDBPath := filepath.Join(tmp, "quest.db")
+	ctx := context.Background()
+
+	db, err := storage.Open(ctx, questDBPath)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := storage.Migrate(ctx, db, "quest"); err != nil {
+		t.Fatalf("migrate quest: %v", err)
+	}
+
+	corpus := embed.QuestCorpus{}
+
+	// Seed the maintainer's stuck-state shape: state=enabled,
+	// state_reason=auto_backfill_promoted, num=9, den=247.
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldEmbedderState), "enabled")
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldEmbedderStateReason), stateReasonAutoBackfillPromoted)
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldVectorCoverageNum), "9")
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldVectorCoverageDen), "247")
+
+	// finalCoverage = 9/247 = 0.036, well below the 0.90 floor.
+	finalCoverage := 9.0 / 247.0
+
+	logger := slog.New(slog.NewJSONHandler(newSafeBuffer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := finalizeCorpusState(ctx, db, corpus, "bge-small-en-v1.5-int8-cls", finalCoverage, logger); err != nil {
+		t.Fatalf("finalizeCorpusState: %v", err)
+	}
+
+	// Assert: state_reason flipped to auto_backfill_partial.
+	var gotReason string
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = ?`, corpus.MetaKey(embed.FieldEmbedderStateReason),
+	).Scan(&gotReason); err != nil {
+		t.Fatalf("read state_reason: %v", err)
+	}
+	if gotReason != stateReasonAutoBackfillPartial {
+		t.Errorf("state_reason: got %q, want %q (stale promoted with coverage=%.3f should be refreshed)",
+			gotReason, stateReasonAutoBackfillPartial, finalCoverage)
+	}
+
+	// Assert: state stays 'enabled'.
+	var gotState string
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = ?`, corpus.MetaKey(embed.FieldEmbedderState),
+	).Scan(&gotState); err != nil {
+		t.Fatalf("read embedder_state: %v", err)
+	}
+	if gotState != "enabled" {
+		t.Errorf("embedder_state: got %q, want %q", gotState, "enabled")
+	}
+}
+
+// TestFinalizeCorpusState_PreservesNonAutoBackfillReason is the QUEST-253
+// regression gate for init-path provenance preservation. A corpus at
+// state=enabled with a non-auto-backfill state_reason (e.g. set by guild
+// init or an operator) must not have its state_reason overwritten, even
+// when coverage is below the floor.
+func TestFinalizeCorpusState_PreservesNonAutoBackfillReason(t *testing.T) {
+	tmp := t.TempDir()
+	questDBPath := filepath.Join(tmp, "quest.db")
+	ctx := context.Background()
+
+	db, err := storage.Open(ctx, questDBPath)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := storage.Migrate(ctx, db, "quest"); err != nil {
+		t.Fatalf("migrate quest: %v", err)
+	}
+
+	corpus := embed.QuestCorpus{}
+	const initPathReason = "init_path_custom"
+
+	// Seed with an init-path reason (not managed by auto-backfill).
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldEmbedderState), "enabled")
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldEmbedderStateReason), initPathReason)
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldVectorCoverageNum), "9")
+	upsertMeta(t, db, corpus.MetaKey(embed.FieldVectorCoverageDen), "247")
+
+	finalCoverage := 9.0 / 247.0
+
+	logger := slog.New(slog.NewJSONHandler(newSafeBuffer(), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := finalizeCorpusState(ctx, db, corpus, "bge-small-en-v1.5-int8-cls", finalCoverage, logger); err != nil {
+		t.Fatalf("finalizeCorpusState: %v", err)
+	}
+
+	// Assert: state_reason unchanged (init-path provenance preserved).
+	var gotReason string
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = ?`, corpus.MetaKey(embed.FieldEmbedderStateReason),
+	).Scan(&gotReason); err != nil {
+		t.Fatalf("read state_reason: %v", err)
+	}
+	if gotReason != initPathReason {
+		t.Errorf("state_reason: got %q, want %q (init-path provenance must not be overwritten by auto-backfill)",
+			gotReason, initPathReason)
+	}
+}
+
 // intToStr is a local itoa to avoid importing strconv for one call.
 func intToStr(n int) string {
 	if n == 0 {
