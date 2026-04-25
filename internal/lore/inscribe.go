@@ -49,6 +49,10 @@ type InscribeResult struct {
 	DedupHits   []DedupHit
 	BloatWarned bool // true if the ≤60-word principle rule fired
 	BloatWords  int  // word count that triggered the warning (0 if not warned)
+	// NearDupHint is non-empty when a recent entry with matching
+	// topic/tags/prompted_by exceeded the lexical-similarity threshold.
+	// The caller emits this as a 💡 hint line.
+	NearDupHint string
 }
 
 // DedupHit is one entry that the inscribe-time dedup heuristic flagged as
@@ -265,11 +269,24 @@ func Inscribe(ctx context.Context, db *sql.DB, p *InscribeParams) (*InscribeResu
 	// embedder never blocks a successful inscribe.
 	p.Embed.runTx2(ctx, db, entry.ID, entry.Summary)
 
+	// Near-duplicate hint: check recent entries (<=14d) for lexical
+	// similarity on title tokens and summary trigrams. Best-effort only;
+	// a query failure suppresses the hint without blocking the return.
+	nearDupHint := ""
+	if ndCands, ndErr := findNearDupCandidates(ctx, db, p, id, now); ndErr == nil && len(ndCands) > 0 {
+		c := ndCands[0]
+		nearDupHint = fmt.Sprintf(
+			"looks similar to %s %q (%s). did you mean to update or link instead of inscribe new?",
+			formatEntryID(c.EntryID), c.Title, c.MatchReason,
+		)
+	}
+
 	return &InscribeResult{
 		Entry:       entry,
 		DedupHits:   hits,
 		BloatWarned: bloatWarned,
 		BloatWords:  bloatWords,
+		NearDupHint: nearDupHint,
 	}, nil
 }
 
