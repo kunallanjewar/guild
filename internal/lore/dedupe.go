@@ -176,9 +176,12 @@ func findNearDupCandidates(
 		})
 
 		// Surface at most one near-dup hint per inscribe to keep the
-		// output lean. The highest-scoring candidate is naturally first
-		// because the SQL orders by created_at DESC and the freshest
-		// match is most likely to be the relevant one.
+		// output lean. We emit the most-recently-created candidate that
+		// passes the structural+lexical filter (SQL orders by created_at
+		// DESC, first-match-wins). For an advisory hint, "most recent"
+		// is a reasonable proxy for "most likely to be the duplicate
+		// the user just meant to update", though it is not the same as
+		// "highest-scoring".
 		if len(candidates) >= 1 {
 			break
 		}

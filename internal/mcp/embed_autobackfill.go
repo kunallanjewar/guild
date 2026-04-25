@@ -307,10 +307,13 @@ func emitSanityWarn(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, 
 func sanityReference(corpus embed.VectorCorpus) (refTable, refQuery string, ok bool) {
 	switch corpus.Name() {
 	case "quest":
-		// task_status carries one row per (project, task_id) and is the
-		// canonical activity signal. A QuestCorpus den < 0.10 *
+		// task_status carries one row per state transition (multiple rows
+		// per task_id over its lifecycle: posted, accepted, fulfilled,
+		// etc.). It is the canonical activity signal even though it is
+		// not 1-to-1 with quests. A QuestCorpus den < 0.10 *
 		// COUNT(task_status) means tasks_fts_rows was never backfilled
-		// from task_status (LORE-404 reproducer).
+		// from task_status (LORE-404 reproducer); the 10% threshold is
+		// permissive enough to absorb the row-multiplicity noise.
 		return "task_status", `SELECT COUNT(*) FROM task_status`, true
 	default:
 		return "", "", false
