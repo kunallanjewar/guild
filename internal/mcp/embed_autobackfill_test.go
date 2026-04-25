@@ -456,6 +456,359 @@ func mustHaveEvent(t *testing.T, events []autoBackfillEvent, msg, corpus string)
 	t.Errorf("missing event: msg=%q corpus=%q; got events=%+v", msg, corpus, events)
 }
 
+// TestAutoBackfill_QUEST246_HistoricalQuestsBackfilled is the QUEST-246
+// regression gate at the auto-backfill boundary. Reproduces the
+// LORE-404 reproducer at fixture scale: a quest.db whose 200 task_status
+// rows were never bridged to tasks_fts_rows by the per-INSERT trigger
+// (the historical-data condition migrations 005+006 cohabit on every
+// upgrading install). After the auto-backfill goroutine completes,
+// quest_vectors must hold >= 200 rows and quest.vector_coverage_den
+// must reflect the same.
+func TestAutoBackfill_QUEST246_HistoricalQuestsBackfilled(t *testing.T) {
+	tmp := t.TempDir()
+	loreDBPath := filepath.Join(tmp, "lore.db")
+	questDBPath := filepath.Join(tmp, "quest.db")
+
+	resetAutoBackfillState()
+	t.Cleanup(resetAutoBackfillState)
+
+	origLdb := ldbPath
+	origQdb := qdbPath
+	ldbPath = func() (string, error) { return loreDBPath, nil }
+	qdbPath = func() (string, error) { return questDBPath, nil }
+	t.Cleanup(func() {
+		ldbPath = origLdb
+		qdbPath = origQdb
+	})
+
+	// Seed lore with zero pending: keeps the lore corpus quiet so the
+	// test's signal stays focused on the quest path.
+	seedEmptyLoreAlreadyCovered(t, loreDBPath)
+
+	// Seed quest.db with 200 historical-style rows. The helper drops the
+	// auto-bridge trigger before inserting so the seed mirrors the
+	// pre-006 historical-data state.
+	seedQuestHistoricalRows(t, questDBPath, 200)
+
+	logger := slog.New(slog.NewJSONHandler(newSafeBuffer(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	deps := &lore.EmbedDeps{
+		Embedder: embed.NewDeterministicEmbedder(),
+		ModelID:  "bge-small-en-v1.5-int8-cls",
+		Async:    true,
+		Logger:   logger,
+	}
+
+	maybeTriggerAutoBackfill(deps, logger)
+
+	select {
+	case <-autoBackfillDoneCh:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("auto-backfill did not finish within 60s")
+	}
+
+	// Assertion 1: quest_vectors row count >= 200.
+	ctx := context.Background()
+	qdb, err := storage.Open(ctx, questDBPath)
+	if err != nil {
+		t.Fatalf("reopen quest db: %v", err)
+	}
+	defer func() { _ = qdb.Close() }()
+
+	var vecCount int64
+	if err := qdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM quest_vectors`).Scan(&vecCount); err != nil {
+		t.Fatalf("count quest_vectors: %v", err)
+	}
+	if vecCount < 200 {
+		t.Errorf("quest_vectors count after auto-backfill: got %d, want >= 200", vecCount)
+	}
+
+	// Assertion 2: quest.vector_coverage_den >= 200.
+	var denStr string
+	if err := qdb.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = 'quest.vector_coverage_den'`,
+	).Scan(&denStr); err != nil {
+		t.Fatalf("read coverage_den: %v", err)
+	}
+	den, perr := parseInt64(denStr)
+	if perr != nil {
+		t.Fatalf("parse coverage_den %q: %v", denStr, perr)
+	}
+	if den < 200 {
+		t.Errorf("quest.vector_coverage_den after auto-backfill: got %d, want >= 200", den)
+	}
+}
+
+// TestAutoBackfill_SilentSuccessGuard verifies the QUEST-246 Part B
+// behavior. A quest.db where tasks_fts_rows is implausibly small
+// relative to task_status (the LORE-404 reproducer shape) must produce
+// a slog WARN line naming the observed numbers. The guard is the
+// upgrade-path safety net that prevented LORE-404 from being noticed
+// silently for many cycles.
+func TestAutoBackfill_SilentSuccessGuard(t *testing.T) {
+	tmp := t.TempDir()
+	loreDBPath := filepath.Join(tmp, "lore.db")
+	questDBPath := filepath.Join(tmp, "quest.db")
+
+	resetAutoBackfillState()
+	t.Cleanup(resetAutoBackfillState)
+
+	origLdb := ldbPath
+	origQdb := qdbPath
+	ldbPath = func() (string, error) { return loreDBPath, nil }
+	qdbPath = func() (string, error) { return questDBPath, nil }
+	t.Cleanup(func() {
+		ldbPath = origLdb
+		qdbPath = origQdb
+	})
+
+	seedEmptyLoreAlreadyCovered(t, loreDBPath)
+
+	// Build the LORE-404 shape: many task_status rows, only a handful
+	// of tasks_fts_rows. The migration-006 backfill is undone via DELETE
+	// so the entity count remains tiny against the live activity signal.
+	seedQuestSilentSuccessShape(t, questDBPath, 100, 5)
+
+	var logBuf safeBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	deps := &lore.EmbedDeps{
+		Embedder: embed.NewDeterministicEmbedder(),
+		ModelID:  "bge-small-en-v1.5-int8-cls",
+		Async:    true,
+		Logger:   logger,
+	}
+
+	maybeTriggerAutoBackfill(deps, logger)
+	select {
+	case <-autoBackfillDoneCh:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("auto-backfill did not finish within 30s")
+	}
+
+	// Assertion: a WARN line about implausible entity count was emitted.
+	logs := logBuf.String()
+	if !strings.Contains(logs, "entity count implausibly small vs live activity") {
+		t.Errorf("expected silent-success WARN line; got logs:\n%s", logs)
+	}
+	if !strings.Contains(logs, `"corpus":"quest"`) {
+		t.Errorf("expected WARN to name corpus=quest; got logs:\n%s", logs)
+	}
+	if !strings.Contains(logs, `"reference_table":"task_status"`) {
+		t.Errorf("expected WARN to name reference_table=task_status; got logs:\n%s", logs)
+	}
+}
+
+// TestAutoBackfill_ArmGateFlipsToRRF verifies that after auto-backfill
+// completes against a fixture with >= 200 historical task_status rows
+// (the QUEST-246 acceptance), the coverage gate trips and a downstream
+// quest_search call would observe arm=rrf rather than arm=bm25.
+//
+// This test does not call quest_search end-to-end (which would require
+// QuestEmbedDeps wiring): instead it asserts the underlying coverage
+// computation that drives the arm choice. The coverage gate constant
+// is questCoverageGate = 0.90; coverage = num/den must clear it.
+func TestAutoBackfill_ArmGateFlipsToRRF(t *testing.T) {
+	tmp := t.TempDir()
+	loreDBPath := filepath.Join(tmp, "lore.db")
+	questDBPath := filepath.Join(tmp, "quest.db")
+
+	resetAutoBackfillState()
+	t.Cleanup(resetAutoBackfillState)
+
+	origLdb := ldbPath
+	origQdb := qdbPath
+	ldbPath = func() (string, error) { return loreDBPath, nil }
+	qdbPath = func() (string, error) { return questDBPath, nil }
+	t.Cleanup(func() {
+		ldbPath = origLdb
+		qdbPath = origQdb
+	})
+
+	seedEmptyLoreAlreadyCovered(t, loreDBPath)
+	seedQuestHistoricalRows(t, questDBPath, 200)
+
+	logger := slog.New(slog.NewJSONHandler(newSafeBuffer(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	deps := &lore.EmbedDeps{
+		Embedder: embed.NewDeterministicEmbedder(),
+		ModelID:  "bge-small-en-v1.5-int8-cls",
+		Async:    true,
+		Logger:   logger,
+	}
+	maybeTriggerAutoBackfill(deps, logger)
+	select {
+	case <-autoBackfillDoneCh:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("auto-backfill did not finish within 60s")
+	}
+
+	// Read coverage_num + coverage_den and confirm coverage >= 0.90.
+	ctx := context.Background()
+	qdb, err := storage.Open(ctx, questDBPath)
+	if err != nil {
+		t.Fatalf("reopen quest db: %v", err)
+	}
+	defer func() { _ = qdb.Close() }()
+
+	var numStr, denStr string
+	if err := qdb.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = 'quest.vector_coverage_num'`,
+	).Scan(&numStr); err != nil {
+		t.Fatalf("read coverage_num: %v", err)
+	}
+	if err := qdb.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = 'quest.vector_coverage_den'`,
+	).Scan(&denStr); err != nil {
+		t.Fatalf("read coverage_den: %v", err)
+	}
+	num, _ := parseInt64(numStr)
+	den, _ := parseInt64(denStr)
+	if den == 0 {
+		t.Fatalf("coverage_den is zero; arm gate cannot evaluate")
+	}
+	coverage := float64(num) / float64(den)
+	if coverage < 0.90 {
+		t.Errorf("post-backfill coverage: got %.3f (num=%d den=%d), want >= 0.90 to flip arm to rrf",
+			coverage, num, den)
+	}
+}
+
+// seedQuestHistoricalRows writes a quest.db that mimics the LORE-404
+// historical-data shape: count task_status rows seeded after the
+// auto-bridge trigger has been temporarily dropped, so each row arrives
+// without a tasks_fts_rows companion. Migration 006 is then re-executed
+// against the seeded DB to backfill the bridge (the production migration
+// has already run via storage.Migrate, so the explicit re-run is the
+// idempotent safety path that proves the SQL recovers the install).
+func seedQuestHistoricalRows(t *testing.T, path string, count int) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := storage.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := storage.Migrate(ctx, db, "quest"); err != nil {
+		t.Fatalf("migrate quest: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO projects (id, path) VALUES ('p', '/tmp/p')`,
+	); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	// Drop the auto-bridge trigger so the seeded rows mirror the
+	// pre-006 historical condition (rows without bridge entries).
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER IF EXISTS tasks_fts_status_ai`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	for i := 1; i <= count; i++ {
+		taskID := "QUEST-H" + intToStr(i)
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO task_status (project_id, task_id, status) VALUES ('p', ?, 'next')`,
+			taskID,
+		); err != nil {
+			t.Fatalf("seed task_status %s: %v", taskID, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO task_notes (project_id, task_id, agent_id, note)
+			 VALUES ('p', ?, 'test', ?)`,
+			taskID, "[spec] subject: historical quest "+intToStr(i),
+		); err != nil {
+			t.Fatalf("seed task_notes %s: %v", taskID, err)
+		}
+	}
+
+	// Re-execute migration 006 SQL: idempotent backfill of bridge rows
+	// + body. Production already applied this once via storage.Migrate;
+	// re-running it after the historical seed is what closes the gap.
+	if _, err := db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO tasks_fts_rows (task_id)
+		SELECT DISTINCT task_id FROM task_status;
+	`); err != nil {
+		t.Fatalf("re-run migration 006 INSERT: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE tasks_fts_rows
+		SET body = COALESCE((
+		  SELECT group_concat(tn.note, ' ')
+		  FROM task_notes tn
+		  WHERE tn.task_id = tasks_fts_rows.task_id
+		    AND tn.note LIKE '[spec]%'
+		), '')
+		WHERE body = '';
+	`); err != nil {
+		t.Fatalf("re-run migration 006 UPDATE: %v", err)
+	}
+	// Reset coverage_den so the auto-backfill assess step recomputes it
+	// from the live bridge count.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES ('quest.vector_coverage_den', (SELECT CAST(COUNT(*) AS TEXT) FROM tasks_fts_rows))
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	); err != nil {
+		t.Fatalf("reset coverage_den: %v", err)
+	}
+}
+
+// seedQuestSilentSuccessShape writes a quest.db with the LORE-404
+// shape: bigStatusCount task_status rows but only fewBridgeCount entries
+// in tasks_fts_rows. It mimics an install that ran migration 005 but
+// somehow ended up without the migration-006 backfill (e.g. the assess
+// path is the only line of defense for a corpus whose entity table got
+// out of sync after operator intervention).
+func seedQuestSilentSuccessShape(t *testing.T, path string, bigStatusCount, fewBridgeCount int) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := storage.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := storage.Migrate(ctx, db, "quest"); err != nil {
+		t.Fatalf("migrate quest: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO projects (id, path) VALUES ('p', '/tmp/p')`,
+	); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	// Drop trigger so task_status seeds do not auto-bridge.
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER IF EXISTS tasks_fts_status_ai`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	for i := 1; i <= bigStatusCount; i++ {
+		taskID := "QUEST-S" + intToStr(i)
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO task_status (project_id, task_id, status) VALUES ('p', ?, 'next')`,
+			taskID,
+		); err != nil {
+			t.Fatalf("seed task_status %s: %v", taskID, err)
+		}
+	}
+
+	// Wipe whatever migration 006 already populated, then bridge only the
+	// first fewBridgeCount rows. This produces den << ref activity, the
+	// silent-success shape.
+	if _, err := db.ExecContext(ctx, `DELETE FROM tasks_fts_rows`); err != nil {
+		t.Fatalf("clear bridge: %v", err)
+	}
+	for i := 1; i <= fewBridgeCount; i++ {
+		taskID := "QUEST-S" + intToStr(i)
+		if _, err := db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO tasks_fts_rows (task_id, body) VALUES (?, ?)`,
+			taskID, "[spec] subject: bridged quest "+intToStr(i),
+		); err != nil {
+			t.Fatalf("seed bridge %s: %v", taskID, err)
+		}
+	}
+	// Reset coverage_den so the assess path recomputes from the bridge.
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES ('quest.vector_coverage_den', (SELECT CAST(COUNT(*) AS TEXT) FROM tasks_fts_rows))
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	); err != nil {
+		t.Fatalf("reset coverage_den: %v", err)
+	}
+}
+
 // intToStr is a local itoa to avoid importing strconv for one call.
 func intToStr(n int) string {
 	if n == 0 {

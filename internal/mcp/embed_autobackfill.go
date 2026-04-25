@@ -217,6 +217,19 @@ func assessCorpus(ctx context.Context, tgt autoBackfillTarget, logger *slog.Logg
 		return 0, 0, false
 	}
 
+	// Silent-success guard (QUEST-246, LORE-404): if den is implausibly
+	// small relative to obvious live activity in the same DB, the corpus
+	// is reporting a healthy num/den that masks a broken entity-source
+	// wiring. Without this guard, a 9/9 = 100% coverage with 240+ real
+	// quests in task_status looks healthy and auto-backfill exits silent.
+	// emitSanityWarn reads a corpus-specific reference count and logs one
+	// WARN line when the den/reference ratio falls below 0.10; the line
+	// names the observed numbers and points operators at the diagnostic
+	// SQL. The check is best-effort: any read error (e.g. the reference
+	// table missing) is silently skipped so the outer assess flow does
+	// not regress on corpora that opt out.
+	emitSanityWarn(readCtx, db, tgt.corpus, den, logger)
+
 	// Empty corpus (zero active entities): nothing to backfill.
 	if den <= 0 {
 		return 0, 1.0, true
@@ -227,6 +240,81 @@ func assessCorpus(ctx context.Context, tgt autoBackfillTarget, logger *slog.Logg
 	}
 	coverage = float64(num) / float64(den)
 	return pending, coverage, true
+}
+
+// sanityRefThreshold is the den/reference ratio below which the
+// silent-success guard fires. 0.10 means "den is less than 10% of the
+// reference signal in the same DB", strong evidence the entity source
+// is wired wrong. The threshold matches the heuristic recommended in
+// LORE-404 (the QUEST-246 spec).
+const sanityRefThreshold = 0.10
+
+// emitSanityWarn checks whether the den computed from
+// corpus.EntityTable() is implausibly small relative to a corpus-
+// specific reference table that signals real activity. When the ratio
+// breaches sanityRefThreshold a single WARN line is emitted naming the
+// observed numbers and the diagnostic action.
+//
+// Per-corpus dispatch is a small switch on corpus.Name() rather than a
+// new VectorCorpus method; the heuristic is a startup-time observability
+// concern, not a property of the corpus's storage shape, and should not
+// pollute the algorithmic port. Adding a new corpus reuses the helper
+// only when its activity-vs-entities mismatch is a plausible failure
+// mode worth surfacing.
+func emitSanityWarn(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, den int64, logger *slog.Logger) {
+	if logger == nil || db == nil {
+		return
+	}
+	refTable, refQuery, ok := sanityReference(corpus)
+	if !ok {
+		return
+	}
+	var ref int64
+	if err := db.QueryRowContext(ctx, refQuery).Scan(&ref); err != nil { //nolint:sqlcheck // refQuery is a compile-time literal selected from sanityReference.
+		// Reference table missing or unreadable. Silent skip: the guard
+		// is advisory, not authoritative.
+		return
+	}
+	if ref <= 0 {
+		// No reference activity to compare against; den at any value is
+		// not surprising on a fresh DB.
+		return
+	}
+	if float64(den) >= sanityRefThreshold*float64(ref) {
+		return
+	}
+	ratio := 0.0
+	if den > 0 {
+		ratio = float64(ref) / float64(den)
+	}
+	logger.Warn("auto-backfill assess: entity count implausibly small vs live activity",
+		slog.String("corpus", corpus.Name()),
+		slog.Int64("entity_den", den),
+		slog.String("reference_table", refTable),
+		slog.Int64("reference_count", ref),
+		slog.Float64("mismatch_ratio", ratio),
+		slog.String("hint", "embeddings will be skipped for most rows; check that the entity-source wiring populates from the canonical activity table"),
+	)
+}
+
+// sanityReference returns the reference-table name, the COUNT(*) query
+// against it, and an ok flag for the given corpus. ok=false opts out of
+// the silent-success guard. The query string is a compile-time literal
+// so callers can pass it directly to QueryRowContext without exposing a
+// SQL-injection seam.
+//
+//nolint:gocritic // unnamedResult: the three return positions are documented in the comment above
+func sanityReference(corpus embed.VectorCorpus) (refTable, refQuery string, ok bool) {
+	switch corpus.Name() {
+	case "quest":
+		// task_status carries one row per (project, task_id) and is the
+		// canonical activity signal. A QuestCorpus den < 0.10 *
+		// COUNT(task_status) means tasks_fts_rows was never backfilled
+		// from task_status (LORE-404 reproducer).
+		return "task_status", `SELECT COUNT(*) FROM task_status`, true
+	default:
+		return "", "", false
+	}
 }
 
 // runOneCorpusBackfill encodes one corpus end-to-end: promotes the
