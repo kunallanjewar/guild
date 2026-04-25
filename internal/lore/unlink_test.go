@@ -60,7 +60,7 @@ func TestUnlinkEntries_Idempotent(t *testing.T) {
 		Title: "target entry for idempotent unlink test", Summary: "s", Topic: "x",
 	})
 
-	// No link exists — must succeed with no-op result.
+	// No link exists, must succeed with no-op result.
 	res, err := UnlinkEntries(ctx, db, a.Entry.ID, b.Entry.ID, RelationInforms)
 	if err != nil {
 		t.Fatalf("unlink (no edge): %v", err)
@@ -218,7 +218,7 @@ func TestUnlinkEntries_WrongRelationIsNoOp(t *testing.T) {
 		t.Fatalf("link informs: %v", err)
 	}
 
-	// Try to unlink using a different relation — must be a no-op.
+	// Try to unlink using a different relation, must be a no-op.
 	res, err := UnlinkEntries(ctx, db, a.Entry.ID, b.Entry.ID, RelationSupersedes)
 	if err != nil {
 		t.Fatalf("unlink supersedes (no-op): %v", err)
