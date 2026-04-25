@@ -40,12 +40,43 @@ Requires macOS or Linux and an MCP-enabled editor (Claude Code, Codex, Cursor, e
 
 ### 1. Install
 
+**Recommended (pre-built binary with semantic retrieval):**
+
 ```bash
-$ curl -fsSL https://github.com/mathomhaus/guild/releases/latest/download/install.sh | sh
-$ guild --version
+curl -fsSL https://github.com/mathomhaus/guild/releases/latest/download/install.sh | sh
+guild --version
 ```
 
-Also available via `brew install mathomhaus/tap/guild` or `go install github.com/mathomhaus/guild/cmd/guild@latest`.
+Or via Homebrew:
+
+```bash
+brew install mathomhaus/tap/guild
+```
+
+Both paths install a binary built with `-tags=withembed`, so semantic
+retrieval works out of the box with no extra steps.
+
+**Clone and build (ship-ready, embed included):**
+
+```bash
+make install   # stages ONNX assets, then go install -tags=withembed
+```
+
+**Dev-only (faster compile, no semantic retrieval):**
+
+```bash
+make install-fast   # go install without -tags=withembed
+```
+
+**`go install` from module proxy (keyword-only retrieval):**
+
+```bash
+go install github.com/mathomhaus/guild/cmd/guild@latest
+```
+
+The Go toolchain cannot embed assets via `@latest`; this path gives
+you BM25 keyword search but not semantic (vector) retrieval. Use
+`install.sh` or `brew` for the full experience.
 
 ### 2. Initialize your project
 

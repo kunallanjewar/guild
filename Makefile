@@ -63,9 +63,14 @@ $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
 .PHONY: build
-build: $(BIN_DIR) ## Build the guild binary → bin/guild
+build: assets $(BIN_DIR) ## Build the guild binary with embedded assets → bin/guild (ship-ready; requires staged assets)
+	$(GO) build $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/guild
+	@echo "✓ built $(BIN) with -tags=withembed ($(VERSION) $(COMMIT))"
+
+.PHONY: build-fast
+build-fast: $(BIN_DIR) ## Build the guild binary WITHOUT embedded assets → bin/guild (dev-iteration only; faster compile, no asset staging needed)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/guild
-	@echo "✓ built $(BIN) ($(VERSION) $(COMMIT))"
+	@echo "✓ built $(BIN) (no embed, $(VERSION) $(COMMIT))"
 
 .PHONY: build-all
 build-all: ## Build all packages (sanity check the full module)
@@ -77,9 +82,18 @@ sqlcheck: $(BIN_DIR) ## Build the SQL-safety analyzer → bin/sqlcheck
 	@echo "✓ built $(SQLCHECK)"
 
 .PHONY: install
-install: ## Install guild to $$GOPATH/bin (go install with ldflags)
+install: assets ## Install guild to $$GOPATH/bin with embedded assets (ship-ready; requires staged assets via `make assets`)
+	$(GO) install $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" ./cmd/guild
+	@echo "✓ installed guild with -tags=withembed ($(VERSION) $(COMMIT))"
+
+.PHONY: install-fast
+install-fast: ## Install guild to $$GOPATH/bin WITHOUT embedded assets (dev-iteration only; faster compile, no asset staging needed)
 	$(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" ./cmd/guild
-	@echo "✓ installed guild ($(VERSION) $(COMMIT))"
+	@echo "✓ installed guild (no embed, $(VERSION) $(COMMIT))"
+
+.PHONY: install-embed
+install-embed: install ## DEPRECATED: use `make install` instead (kept for one cycle so existing scripts do not break)
+	@echo "  note: install-embed is deprecated; `make install` now defaults to -tags=withembed"
 
 # ----------------------------------------------------------------------
 # Test
@@ -242,14 +256,8 @@ regenerate-reference-vectors: assets ## Regenerate internal/lore/embed/testdata/
 	@echo "   (see stderr for provenance: library/model/vocab SHAs, platform, timestamp)"
 
 .PHONY: build-embed
-build-embed: assets ## Build the guild binary with embedded runtime assets (-tags=withembed)
-	$(GO) build $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/guild
-	@echo "✓ built $(BIN) with -tags=withembed"
-
-.PHONY: install-embed
-install-embed: assets ## Install guild with embedded runtime assets to $$GOPATH/bin (-tags=withembed)
-	$(GO) install $(GOFLAGS) -tags=withembed -ldflags "$(LDFLAGS)" ./cmd/guild
-	@echo "✓ installed guild with -tags=withembed ($(VERSION) $(COMMIT))"
+build-embed: build ## DEPRECATED: use `make build` instead (kept for one cycle so existing scripts do not break)
+	@echo "  note: build-embed is deprecated; `make build` now defaults to -tags=withembed"
 
 # ----------------------------------------------------------------------
 # Release

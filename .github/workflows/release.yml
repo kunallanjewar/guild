@@ -75,6 +75,23 @@ jobs:
         with:
           cosign-release: 'v2.4.3'
 
+      # Stage the model + vocab for all platforms. model.onnx and vocab.txt are
+      # stored as GitHub Actions secrets (base64-encoded) because they are too
+      # large to commit to the repo. GUILD_MODEL_B64 and GUILD_VOCAB_B64 must be
+      # set in repo Settings -> Secrets -> Actions.
+      # The ORT shared libraries are downloaded by goreleaser's before.hooks
+      # (make assets-runtime) from the ORT GitHub release; no secret needed for them.
+      - name: Stage model assets
+        env:
+          GUILD_MODEL_B64: ${{ secrets.GUILD_MODEL_B64 }}
+          GUILD_VOCAB_B64: ${{ secrets.GUILD_VOCAB_B64 }}
+        run: |
+          for triple in darwin_arm64 darwin_amd64 linux_amd64 linux_arm64; do
+            mkdir -p internal/lore/embed/assets/${triple}
+            printf '%s' "${GUILD_MODEL_B64}" | base64 -d > internal/lore/embed/assets/${triple}/model.onnx
+            printf '%s' "${GUILD_VOCAB_B64}" | base64 -d > internal/lore/embed/assets/${triple}/vocab.txt
+          done
+
       # goreleaser-action v6 supports goreleaser v2 natively.
       # CGO_ENABLED=0 is set in .goreleaser.yml; repeating it here is
       # belt-and-suspenders to make the intent explicit in CI logs.
