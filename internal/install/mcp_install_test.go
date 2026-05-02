@@ -29,6 +29,10 @@ func stdClientOpts(t *testing.T, clients []Client, out *bytes.Buffer) (opts MCPI
 		In:           &bytes.Buffer{},
 		clients:      clients,
 		executableFn: func() (string, error) { return bin, nil },
+		// Fixtures use synthetic argv[0] names ("claude", "cursor", etc.)
+		// that don't exist on CI runners. Stub PATH resolution so the
+		// missing-CLI guard introduced for issue #48 doesn't skip them.
+		lookPathFn: func(name string) (string, error) { return name, nil },
 	}
 	return opts, fakeBin
 }
@@ -335,6 +339,7 @@ func TestMCPInstall_Run_WithYes(t *testing.T) {
 			// Return a no-op command that exits 0.
 			return exec.Command("true")
 		},
+		lookPathFn: func(name string) (string, error) { return name, nil },
 	}
 
 	result, err := MCPInstall(context.Background(), opts)
@@ -467,6 +472,7 @@ func TestMCPInstall_SpacyBinPath_Run(t *testing.T) {
 			capturedArgv = append([]string{name}, arg...)
 			return exec.Command("true")
 		},
+		lookPathFn: func(name string) (string, error) { return name, nil },
 	}
 
 	if _, err := MCPInstall(context.Background(), opts); err != nil {
@@ -486,5 +492,59 @@ func TestMCPInstall_SpacyBinPath_Run(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("spacy binary path not found as a single argv token; got: %v", capturedArgv)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// --run: skips clients whose install CLI is not on PATH (#48)
+// ---------------------------------------------------------------------------
+
+// TestMCPInstall_Run_SkipsWhenCLIMissing verifies that when a client's
+// install argv[0] cannot be resolved via exec.LookPath, MCPInstall does
+// not attempt to run it, records the skip in SkippedMissingCLI, and
+// prints the one-line notice.
+func TestMCPInstall_Run_SkipsWhenCLIMissing(t *testing.T) {
+	var executed int
+
+	badBinary := "nonexistent-install-cli-xyzzy-99"
+	c := alwaysDetected("Bogus", func(b string) []string {
+		return []string{badBinary, "mcp", "add", "guild", "--", b}
+	})
+
+	dir := t.TempDir()
+	fakeBin := dir + "/guild"
+	if err := os.WriteFile(fakeBin, []byte{}, 0o600); err != nil {
+		t.Fatalf("create temp binary: %v", err)
+	}
+
+	var buf bytes.Buffer
+	opts := MCPInstallOptions{
+		Run:          true,
+		Yes:          true,
+		Out:          &buf,
+		In:           &bytes.Buffer{},
+		clients:      []Client{c},
+		executableFn: func() (string, error) { return fakeBin, nil },
+		execCmdFn: func(name string, arg ...string) *exec.Cmd {
+			executed++
+			return exec.Command("true")
+		},
+	}
+
+	result, err := MCPInstall(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("MCPInstall --run --yes: %v", err)
+	}
+	if executed != 0 {
+		t.Errorf("execCmdFn called %d times; expected 0 (CLI missing on PATH)", executed)
+	}
+	if got := len(result.SkippedMissingCLI); got != 1 {
+		t.Errorf("SkippedMissingCLI len = %d, want 1", got)
+	}
+	if len(result.Ran) != 0 {
+		t.Errorf("Ran = %v, want empty", result.Ran)
+	}
+	if !strings.Contains(buf.String(), "skipping Bogus: "+badBinary+" not on PATH") {
+		t.Errorf("expected missing-CLI notice; got:\n%s", buf.String())
 	}
 }
