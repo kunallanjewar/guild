@@ -16,6 +16,7 @@ import (
 	"github.com/mathomhaus/guild/internal/command"
 	"github.com/mathomhaus/guild/internal/config"
 	"github.com/mathomhaus/guild/internal/guildpath"
+	"github.com/mathomhaus/guild/internal/hooks"
 	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/storage"
@@ -88,6 +89,13 @@ type appraiseFlags struct {
 	Since       string
 	WFTS        float64
 	WRecency    float64
+	// Hook-mode flags. --inject prints the bounded pointer-cite payload
+	// for harness context injection; --query and --from-stdin-json are
+	// its alternative query sources. See internal/hooks/payload.go for
+	// the stdout contract.
+	Inject        bool
+	Query         string
+	FromStdinJSON bool
 }
 
 // newAppraiseCmd builds `guild lore appraise QUERY ...`. The alias
@@ -98,7 +106,15 @@ func newAppraiseCmd() *cobra.Command {
 		Use:     "appraise QUERY",
 		Aliases: []string{"check"},
 		Short:   "hybrid search (BM25 + recency + title-boost)",
-		Args:    cobra.MinimumNArgs(1),
+		// Hook mode (--inject) may source the query from --query or the
+		// stdin JSON envelope, so the positional becomes optional there.
+		// Every other invocation keeps the legacy at-least-one-arg rule.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if inject, _ := cmd.Flags().GetBool("inject"); inject {
+				return nil
+			}
+			return cobra.MinimumNArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAppraise(cmd, args, f)
 		},
@@ -110,7 +126,35 @@ func newAppraiseCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.Since, "since", "", "only entries created within: Nd|Nw|Nm")
 	cmd.Flags().Float64Var(&f.WFTS, "w-fts", 0, "override scoring weight for BM25 (0..1)")
 	cmd.Flags().Float64Var(&f.WRecency, "w-recency", 0, "override scoring weight for recency (0..1)")
+	cmd.Flags().BoolVar(&f.Inject, "inject", false, "hook mode: print a bounded top-3 pointer-cite payload for context injection")
+	cmd.Flags().StringVar(&f.Query, "query", "", "query text (hook mode alternative to the positional QUERY)")
+	cmd.Flags().BoolVar(&f.FromStdinJSON, "from-stdin-json", false, "read the harness hook JSON envelope from stdin and use its .prompt as the query (hook mode)")
 	return cmd
+}
+
+// appraiseQuery resolves the search query for runAppraise. Hook mode
+// (--inject) accepts three sources in priority order: --query, the
+// stdin JSON envelope (--from-stdin-json), then the positional QUERY.
+// Outside hook mode the hook-only flags are rejected and the joined
+// positional args are the query, as before.
+func appraiseQuery(cmd *cobra.Command, args []string, f appraiseFlags) (string, error) {
+	if !f.Inject {
+		if f.Query != "" || f.FromStdinJSON {
+			return "", errors.New("--query and --from-stdin-json require --inject")
+		}
+		return strings.Join(args, " "), nil
+	}
+	switch {
+	case f.Query != "" && f.FromStdinJSON:
+		return "", errors.New("--query and --from-stdin-json are mutually exclusive")
+	case f.Query != "":
+		return f.Query, nil
+	case f.FromStdinJSON:
+		return hooks.PromptFromHookEnvelope(cmd.InOrStdin())
+	case len(args) > 0:
+		return strings.Join(args, " "), nil
+	}
+	return "", errors.New("appraise --inject needs a query: pass --query, --from-stdin-json, or a positional QUERY")
 }
 
 func runAppraise(cmd *cobra.Command, args []string, f appraiseFlags) error {
@@ -123,13 +167,18 @@ func runAppraise(cmd *cobra.Command, args []string, f appraiseFlags) error {
 	if err != nil {
 		return err
 	}
+	// Resolve the query before opening the DB so a malformed stdin
+	// envelope fails fast with empty stdout (hook contract).
+	query, err := appraiseQuery(cmd, args, f)
+	if err != nil {
+		return err
+	}
 	db, err := openLoreDB(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = db.Close() }()
 
-	query := strings.Join(args, " ")
 	var projectID string
 	if !f.AllProjects || f.Project != "" {
 		// Project-scoped: require a resolvable project.
@@ -184,7 +233,11 @@ func runAppraise(cmd *cobra.Command, args []string, f appraiseFlags) error {
 	}
 
 	w := cmd.OutOrStdout()
-	renderAppraiseOutput(w, out, query, cfg)
+	if f.Inject {
+		renderAppraiseInject(w, out)
+	} else {
+		renderAppraiseOutput(w, out, query, cfg)
+	}
 
 	if len(out.Results) == 0 {
 		// Record the miss — query text IS logged here (privacy contract).
@@ -197,6 +250,38 @@ func runAppraise(cmd *cobra.Command, args []string, f appraiseFlags) error {
 
 	_ = telemetry.Record(ctx, cfg, projectID, "lore appraise", 0, time.Since(start), 0)
 	return nil
+}
+
+// renderAppraiseInject writes the bounded pointer-cite payload for
+// `lore appraise --inject`. Zero matches write nothing: empty stdout
+// plus exit 0 is the hook contract, so the harness silently drops the
+// inject. Pointer cites only; entry bodies never reach stdout.
+func renderAppraiseInject(w io.Writer, out *lore.AppraiseOutput) {
+	if len(out.Results) == 0 {
+		return
+	}
+	lines := make([]hooks.AppraiseLine, 0, hooks.MaxAppraiseLines)
+	for i, r := range out.Results {
+		if i >= hooks.MaxAppraiseLines {
+			break
+		}
+		age := 0
+		if !r.Entry.CreatedAt.IsZero() {
+			if d := int(time.Since(r.Entry.CreatedAt).Hours() / 24); d > 0 {
+				age = d
+			}
+		}
+		lines = append(lines, hooks.AppraiseLine{
+			ID:      lore.EntryID(r.Entry.ID),
+			Kind:    string(r.Entry.Kind),
+			AgeDays: age,
+			Title:   r.Entry.Title,
+			Summary: r.Entry.Summary,
+		})
+	}
+	if payload := hooks.RenderAppraise(lines, len(out.Results)); payload != "" {
+		fmt.Fprintln(w, payload)
+	}
 }
 
 func renderAppraiseOutput(w io.Writer, out *lore.AppraiseOutput, query string, cfg *config.Config) {
