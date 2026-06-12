@@ -10,45 +10,27 @@ import (
 	"github.com/mathomhaus/guild/internal/quest"
 )
 
-// Register wires every guild tool onto s. Called exactly once from
-// build() in server.go. bootstrap → always-on; no deferred tier.
+// Register wires every guild tool onto s against a default per-process
+// core: per-PID session identity plus a fresh provider bundle, exactly
+// what the stdio server runs with. Hosts that need injectable seams
+// (explicit session identity, shared provider bundle) construct through
+// NewServer instead, which routes the same registration with their
+// options. bootstrap → always-on; no deferred tier.
 func Register(s *sdkmcp.Server) {
-	// Reset so hintsBridge builds one engine per server rebuild and all
-	// Deps builders in this Register share it. See hints.go comment.
-	closeCurrentHintsEngine()
-	// The embedder port (ADR-003 Phase 1, QUEST-219 lazy-reconstruct)
-	// is wired as a provider, not a static *EmbedDeps. The provider
-	// re-reads meta.embedder_state on every lore tool entry and
-	// reconstructs when the state flips mid-session (the guild-init
-	// trap captured in LORE-371). Each test-spawned server gets its
-	// own provider.
-	currentEmbedProvider = newEmbedProvider(openLoreDB, newLogger())
-	// Quest embed provider shares the lore-side Embedder and builds its own
-	// QuestCorpus Index against quest.db. Resolves lazily on the first
-	// quest_search call that sees meta.quest.embedder_state="enabled". QUEST-258.
-	currentQuestEmbedProvider = newQuestEmbedProvider(currentEmbedProvider, openQuestDB, newLogger())
-	// Reset the auto-backfill once-guard so each server rebuild sees a
-	// fresh trigger. The provider's first post-reset resolve that wires
-	// a live *EmbedDeps fires the per-corpus backfill goroutines.
-	// QUEST-229 / LORE-384.
-	resetAutoBackfillState()
-	registerBootstrap(s)
-	registerAlwaysOn(s)
+	registerAll(s, &serverCore{
+		sessions:  processSessionStore{},
+		providers: newProcessProviders(),
+	})
 }
 
-// currentEmbedProvider is the per-server-rebuild embed lazy-resolver.
-// Every lore tool handler pulls *lore.EmbedDeps from it via
-// embedFromDeps; a nil *EmbedDeps return (meta.embedder_state !=
-// "enabled") branches to BM25+stopwords exactly like Phase 0.
-// Reset in Register() so each test-spawned server builds its own
-// provider with its own cache + mutex. QUEST-219.
-var currentEmbedProvider *embedProvider
-
-// currentQuestEmbedProvider is the per-server-rebuild quest embed lazy-resolver.
-// Quest_search pulls *quest.QuestEmbedDeps from it via questEmbedFromDeps;
-// a nil return means BM25-only. Shares the lore-side Embedder; builds its own
-// QuestCorpus Index against quest.db. QUEST-258.
-var currentQuestEmbedProvider *questEmbedProvider
+// registerAll wires every guild tool onto s against core. Called once
+// per constructed server (NewServer or Register); every handler closure
+// and Deps bundle built here references this core and no package-level
+// state, so two servers in one process cannot clobber each other.
+func registerAll(s *sdkmcp.Server, core *serverCore) {
+	core.registerBootstrap(s)
+	core.registerAlwaysOn(s)
+}
 
 // buildMCPCommandDeps constructs the quest-side Deps bundle. The
 // registry's OpenDB opens quest.db; ResolveProj uses the auto-bootstrap
@@ -61,18 +43,18 @@ var currentQuestEmbedProvider *questEmbedProvider
 // kind=decision lore entry alongside the quest.
 // Embed carries the questEmbedProvider so quest_search can reach the
 // RRF arm when meta.quest.embedder_state="enabled" (QUEST-258).
-func buildMCPCommandDeps() command.Deps {
+func (c *serverCore) buildMCPCommandDeps() command.Deps {
 	d := command.Deps{
 		OpenDB:           openQuestDB,
-		ResolveProj:      resolveProjectAutoBootstrap,
+		ResolveProj:      c.resolveProjectAutoBootstrap,
 		Now:              time.Now,
-		RecordTelemetry:  recordMCPTelemetry,
+		RecordTelemetry:  c.recordMCPTelemetry,
 		PrependNarration: true,
 		OpenLoreDB:       openLoreDB,
-		EvaluateHints:    hintsBridge(),
+		EvaluateHints:    c.providers.hintsBridge(),
 	}
-	if currentQuestEmbedProvider != nil {
-		d.Embed = currentQuestEmbedProvider
+	if c.providers.questEmbed != nil {
+		d.Embed = c.providers.questEmbed
 	}
 	return d
 }
@@ -90,18 +72,18 @@ func buildMCPCommandDeps() command.Deps {
 // *embedProvider would become a non-nil interface value and defeat
 // the nil-check in embedFromDeps. Only assign the field when the
 // provider is genuinely non-nil.
-func buildMCPLoreDeps() command.Deps {
+func (c *serverCore) buildMCPLoreDeps() command.Deps {
 	d := command.Deps{
 		OpenDB:           openLoreDB,
-		ResolveProj:      resolveProjectAutoBootstrap,
+		ResolveProj:      c.resolveProjectAutoBootstrap,
 		Now:              time.Now,
-		RecordTelemetry:  recordMCPTelemetry,
+		RecordTelemetry:  c.recordMCPTelemetry,
 		RecordMiss:       recordMCPMiss,
 		PrependNarration: true,
-		EvaluateHints:    hintsBridge(),
+		EvaluateHints:    c.providers.hintsBridge(),
 	}
-	if currentEmbedProvider != nil {
-		d.Embed = currentEmbedProvider
+	if c.providers.embed != nil {
+		d.Embed = c.providers.embed
 	}
 	return d
 }
@@ -109,16 +91,16 @@ func buildMCPLoreDeps() command.Deps {
 // registerBootstrap wires the tools that agents MUST be able to call
 // before any active project exists: session start, mid-session project
 // switch, and guild_status (re-orientation without re-bootstrapping).
-func registerBootstrap(s *sdkmcp.Server) {
-	registerSessionStart(s)
-	registerSetProject(s)
-	registerGuildStatus(s)
+func (c *serverCore) registerBootstrap(s *sdkmcp.Server) {
+	c.registerSessionStart(s)
+	c.registerSetProject(s)
+	c.registerGuildStatus(s)
 }
 
 // registerAlwaysOn wires all guild tools. Full surface advertised at init.
-func registerAlwaysOn(s *sdkmcp.Server) {
+func (c *serverCore) registerAlwaysOn(s *sdkmcp.Server) {
 	// --- lore (read + write, common) ---
-	loreDeps := buildMCPLoreDeps()
+	loreDeps := c.buildMCPLoreDeps()
 	lore.AppraiseCommand.BindMCP(s, loreDeps)
 	lore.StudyCommand.BindMCP(s, loreDeps)
 	lore.OathCommand.BindMCP(s, loreDeps)
@@ -143,7 +125,7 @@ func registerAlwaysOn(s *sdkmcp.Server) {
 	lore.EmbedRebuildCommand.BindMCP(s, loreDeps)
 	lore.CoverageReconcileCommand.BindMCP(s, loreDeps)
 	// --- quest (common flow) ---
-	mcpDeps := buildMCPCommandDeps()
+	mcpDeps := c.buildMCPCommandDeps()
 	quest.PostCommand.BindMCP(s, mcpDeps)
 	quest.UpdateCommand.BindMCP(s, mcpDeps)
 	quest.AcceptCommand.BindMCP(s, mcpDeps)
@@ -157,7 +139,7 @@ func registerAlwaysOn(s *sdkmcp.Server) {
 	quest.BriefCommand.BindMCP(s, mcpDeps)
 	quest.SummonCommand.BindMCP(s, mcpDeps)
 	quest.OrdersCommand.BindMCP(s, mcpDeps)
-	registerQuestBounties(s)
+	c.registerQuestBounties(s)
 	quest.ListCommand.BindMCP(s, mcpDeps)
 	quest.ScrollCommand.BindMCP(s, mcpDeps)
 	quest.PulseCommand.BindMCP(s, mcpDeps)

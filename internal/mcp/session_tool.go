@@ -13,7 +13,6 @@ import (
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
 	"github.com/mathomhaus/guild/internal/release"
-	"github.com/mathomhaus/guild/internal/session"
 )
 
 // binaryVersion is the ldflags-stamped version string injected by
@@ -77,14 +76,15 @@ var sessionStartTool = &sdkmcp.Tool{
 }
 
 // registerSessionStart wires guild_session_start onto s. Package-
-// private so Serve is the only public construction path.
+// private so Serve and NewServer are the only public construction
+// paths.
 //
-// The handler closure captures no state beyond its input: all
-// persistence goes through [session.SetActiveProject] (per-PID file at
-// ~/.guild/sessions/<pid>.json) and bounties/oath payloads are
-// resolved on every call from the project's registered DBs.
-func registerSessionStart(s *sdkmcp.Server) {
-	sdkmcp.AddTool(s, sessionStartTool, handleSessionStart)
+// The handler closes over the server core only: all persistence goes
+// through the core's SessionStore (per-PID file at
+// ~/.guild/sessions/<pid>.json on the default path) and bounties/oath
+// payloads are resolved on every call from the project's registered DBs.
+func (c *serverCore) registerSessionStart(s *sdkmcp.Server) {
+	sdkmcp.AddTool(s, sessionStartTool, c.handleSessionStart)
 }
 
 // handleSessionStart is the tool handler. Thin: validate input,
@@ -92,10 +92,10 @@ func registerSessionStart(s *sdkmcp.Server) {
 // through quest.Bounties + lore.Oath so the agent receives the real
 // briefing + top task on the very first call.
 //
-// The ctx parameter is threaded through the session.Save path and every
-// downstream DB call so a client-side cancellation aborts the whole
-// bootstrap.
-func handleSessionStart(
+// The ctx parameter is threaded through the session-store save path and
+// every downstream DB call so a client-side cancellation aborts the
+// whole bootstrap.
+func (c *serverCore) handleSessionStart(
 	ctx context.Context,
 	_ *sdkmcp.CallToolRequest,
 	in sessionStartInput,
@@ -104,10 +104,10 @@ func handleSessionStart(
 	var handlerErr error
 	var respBytes uint
 	//nolint:gocritic // ptrToRefParam — defer reads late-bound values
-	defer recordMCPTelemetry(ctx, "guild_session_start", start, &handlerErr, &respBytes)
+	defer c.recordMCPTelemetry(ctx, "guild_session_start", start, &handlerErr, &respBytes)
 	// Tell the hint engine we saw a session-start so the no-session-start
 	// rule suppresses for this session.
-	hintsRecordBootstrap("guild_session_start")
+	c.providers.recordHintsBootstrap("guild_session_start")
 
 	name := strings.TrimSpace(in.Project)
 	var viaWorktreeFallback bool
@@ -135,7 +135,7 @@ func handleSessionStart(
 		viaWorktreeFallback = fallback
 	}
 
-	if err := session.SetActiveProject(ctx, name); err != nil {
+	if err := c.sessions.SetActiveProject(ctx, name); err != nil {
 		// Persist failures are fatal from the agent's POV: retrying
 		// won't help if the home directory is unwritable. Surface the
 		// OS-level detail so the user (not the agent) can fix it.

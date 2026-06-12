@@ -76,40 +76,60 @@ func init() {
 	}
 }
 
-// autoBackfillOnce guards the trigger. sync.Once semantics: regardless
-// of how many lore tool handlers race through ResolveEmbedDeps at
-// startup, maybeTriggerAutoBackfill runs its body exactly once. A
-// subsequent meta flip (mid-session disable/enable) does NOT re-fire
-// auto-backfill: once is enough, and hot-path writes keep coverage
-// moving afterward.
+// backfillInsertHook is the signature of the test-only insert seam
+// threaded into embed.Backfill. See backfillGate.insertHook.
+type backfillInsertHook func(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, entry embed.PendingEntry, vec []float32, modelID string) error
+
+// backfillGate owns the auto-backfill once-guard for one provider
+// bundle. sync.Once semantics: regardless of how many lore tool
+// handlers race through ResolveEmbedDeps at startup, maybeTrigger runs
+// its body exactly once per gate. A subsequent meta flip (mid-session
+// disable/enable) does NOT re-fire auto-backfill: once is enough, and
+// hot-path writes keep coverage moving afterward.
 //
-// Reset in Register() so each test-spawned server gets its own gate.
-var autoBackfillOnce sync.Once
+// One gate per Providers bundle: a multi-session host that shares a
+// bundle across servers shares the gate, so per-connection registration
+// cannot re-fire the trigger. The default path builds a fresh bundle
+// (and gate) per server construction, matching the historical
+// reset-per-Register lifecycle.
+type backfillGate struct {
+	once sync.Once
 
-// autoBackfillDoneCh is closed when every spawned goroutine has
-// completed (successfully or not). Nil until the trigger fires; tests
-// read it via waitForAutoBackfill. Writes to this variable happen
-// inside autoBackfillOnce.Do so there is no race.
-var autoBackfillDoneCh chan struct{}
+	// doneCh is closed when every spawned goroutine has completed
+	// (successfully or not). Nil until the trigger fires. Writes happen
+	// inside once.Do so there is no race with post-trigger readers.
+	doneCh chan struct{}
 
-// resetAutoBackfillState restores the package-level gate so the next
-// provider-resolve-wired cycle can fire the trigger again. Called from
-// Register() so each rebuilt server (real or test-spawned) sees a
-// clean sync.Once.
-func resetAutoBackfillState() {
-	autoBackfillOnce = sync.Once{}
-	autoBackfillDoneCh = nil
-	autoBackfillInsertHook = nil
+	// insertHook is a test-only seam that lets the regression test for
+	// QUEST-248 inject a fail-intermittently shim around the real
+	// insertVectorRow without invasive surgery. Production code leaves
+	// this nil; embed.Backfill then calls insertVectorRow directly.
+	// Tests assign it under t.Cleanup so concurrent runs do not see
+	// each other's hook.
+	insertHook backfillInsertHook
 }
 
-// autoBackfillInsertHook is a test-only seam that lets the regression
-// test for QUEST-248 inject a fail-intermittently shim around the real
-// insertVectorRow without invasive surgery. Production code leaves this
-// nil; embed.Backfill then calls insertVectorRow directly. Tests assign
-// it under t.Cleanup so concurrent runs do not see each other's hook.
-var autoBackfillInsertHook func(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, entry embed.PendingEntry, vec []float32, modelID string) error
+// processBackfillGate is the package-default gate behind the direct
+// maybeTriggerAutoBackfill entry point and behind embed providers
+// constructed without a bundle (test-only constructions). Providers
+// bundles own their own gate; see NewProviders.
+var processBackfillGate = &backfillGate{}
 
-// maybeTriggerAutoBackfill is the single entry point invoked from
+// resetAutoBackfillState swaps in a fresh package-default gate so the
+// next provider-resolve-wired cycle can fire the trigger again. Test
+// seam; production gates live one-per-bundle and are never reset.
+func resetAutoBackfillState() {
+	processBackfillGate = &backfillGate{}
+}
+
+// maybeTriggerAutoBackfill fires the package-default gate. Kept as a
+// package-level entry point for tests that drive the trigger directly;
+// production resolves route through the owning bundle's gate.
+func maybeTriggerAutoBackfill(deps *lore.EmbedDeps, logger *slog.Logger) {
+	processBackfillGate.maybeTrigger(deps, logger)
+}
+
+// maybeTrigger is the single entry point invoked from
 // embedProvider.reconstruct after a successful wire. Called with the
 // live *lore.EmbedDeps so the goroutines can reuse the binary's
 // Embedder instance without re-probing.
@@ -120,25 +140,25 @@ var autoBackfillInsertHook func(ctx context.Context, db *sql.DB, corpus embed.Ve
 //     Enabled(); the caller (reconstruct) ensures this.
 //   - logger: the server-scoped structured logger.
 //
-// This function returns immediately; all work happens in background
-// goroutines guarded by autoBackfillOnce.
-func maybeTriggerAutoBackfill(deps *lore.EmbedDeps, logger *slog.Logger) {
+// This method returns immediately; all work happens in background
+// goroutines guarded by g.once.
+func (g *backfillGate) maybeTrigger(deps *lore.EmbedDeps, logger *slog.Logger) {
 	if deps == nil || !deps.Enabled() {
 		return
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	autoBackfillOnce.Do(func() {
+	g.once.Do(func() {
 		targets := autoBackfillTargets
 		done := make(chan struct{})
-		autoBackfillDoneCh = done
+		g.doneCh = done
 
 		// context.Background() because auto-backfill is server-lifetime
 		// work: the handler call that triggered us may finish in
 		// milliseconds, but the backfill runs for as long as it takes.
 		// ctx.Err() checks inside Backfill make this safe to abandon.
-		go runAutoBackfill(context.Background(), targets, deps, logger, done)
+		go runAutoBackfill(context.Background(), targets, deps, g.insertHook, logger, done)
 	})
 }
 
@@ -146,8 +166,9 @@ func maybeTriggerAutoBackfill(deps *lore.EmbedDeps, logger *slog.Logger) {
 // registered corpus target: decide whether to act (pending > 0 and
 // coverage < 0.90) and if so spawn a per-corpus goroutine. Waits for
 // every goroutine to finish before closing done so tests can
-// deterministically assert completion.
-func runAutoBackfill(ctx context.Context, targets []autoBackfillTarget, deps *lore.EmbedDeps, logger *slog.Logger, done chan struct{}) {
+// deterministically assert completion. insertHook is the gate's
+// test-only insert seam, nil in production.
+func runAutoBackfill(ctx context.Context, targets []autoBackfillTarget, deps *lore.EmbedDeps, insertHook backfillInsertHook, logger *slog.Logger, done chan struct{}) {
 	defer close(done)
 
 	var wg sync.WaitGroup
@@ -164,7 +185,7 @@ func runAutoBackfill(ctx context.Context, targets []autoBackfillTarget, deps *lo
 		wg.Add(1)
 		go func(tgt autoBackfillTarget, pending int64, coverage float64) {
 			defer wg.Done()
-			runOneCorpusBackfill(ctx, tgt, deps, pending, coverage, logger)
+			runOneCorpusBackfill(ctx, tgt, deps, insertHook, pending, coverage, logger)
 		}(tgt, pending, coverage)
 	}
 	wg.Wait()
@@ -386,7 +407,7 @@ func isAutoBackfillReason(reason string) bool {
 // cycle), or one ERROR on a non-recoverable open/finalize failure.
 // Never panics; the caller's goroutine recovers silently via the
 // normal defer chain.
-func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lore.EmbedDeps, pending int64, coverageBefore float64, logger *slog.Logger) {
+func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lore.EmbedDeps, insertHook backfillInsertHook, pending int64, coverageBefore float64, logger *slog.Logger) {
 	started := time.Now()
 	corpusName := tgt.corpus.Name()
 
@@ -427,7 +448,7 @@ func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lor
 			Embedder:   deps.Embedder,
 			ModelID:    deps.ModelID,
 			Logger:     logger,
-			InsertHook: autoBackfillInsertHook,
+			InsertHook: insertHook,
 		})
 		if err != nil {
 			fields := []any{

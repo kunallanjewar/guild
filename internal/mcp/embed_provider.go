@@ -60,6 +60,12 @@ type embedProvider struct {
 	// every reconstruction and the "embedder resolve failed" warn on
 	// any error.
 	logger *slog.Logger
+
+	// backfill is the auto-backfill once-guard consulted after a
+	// successful wire. Set by NewProviders so servers sharing one
+	// bundle share one trigger; nil (direct test constructions) falls
+	// back to the package-default gate.
+	backfill *backfillGate
 }
 
 // newEmbedProvider builds a provider with an unset cache. The first
@@ -207,14 +213,17 @@ func (p *embedProvider) reconstruct(ctx context.Context, reason string) *lore.Em
 		slog.Int64("vector_epoch", epoch),
 	)
 	// Trigger auto-backfill the first time we observe a wired embedder.
-	// The sync.Once inside maybeTriggerAutoBackfill guarantees exactly-
-	// once semantics per process, so concurrent provider resolves racing
-	// the initial enable all collapse to one invocation. Non-blocking:
-	// each per-corpus backfill runs in its own goroutine. QUEST-229 /
-	// LORE-384.
-	//
+	// The sync.Once inside the gate guarantees exactly-once semantics
+	// per gate (one gate per provider bundle), so concurrent provider
+	// resolves racing the initial enable all collapse to one invocation.
+	// Non-blocking: each per-corpus backfill runs in its own goroutine.
+	// QUEST-229 / LORE-384.
+	gate := p.backfill
+	if gate == nil {
+		gate = processBackfillGate
+	}
 	//nolint:contextcheck // the auto-backfill goroutine is server-lifetime work and intentionally uses context.Background() internally, per QUEST-229 design bar.
-	maybeTriggerAutoBackfill(deps, p.logger)
+	gate.maybeTrigger(deps, p.logger)
 	return deps
 }
 
