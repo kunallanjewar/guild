@@ -377,6 +377,39 @@ docker-test: docker-build ## Build then smoke-test the image: --version, init, i
 	echo "✓ docker-test passed ($(DOCKER_IMAGE):$(DOCKER_TAG))"
 
 # ----------------------------------------------------------------------
+# E2E (test/e2e: scripted full-loop scenarios in an isolated container)
+# ----------------------------------------------------------------------
+
+##@ E2E
+
+# Image the e2e suite drives. Defaults to the docker-build output.
+GUILD_E2E_IMAGE ?= $(DOCKER_IMAGE):$(DOCKER_TAG)
+
+# GUILD_E2E_MODE selects the server process model inside the container.
+# "direct" (default) spawns `guild mcp serve` per session. "daemon" is a
+# documented no-op hook until the guild daemon ships; it runs identical
+# scenarios against the same golden transcripts so daemon-up vs
+# daemon-down can later be asserted byte-identical.
+GUILD_E2E_MODE ?= direct
+
+.PHONY: e2e
+e2e: ## Run the e2e scenario suite against an existing image (set GUILD_E2E_IMAGE to override)
+	GUILD_E2E_DOCKER=1 GUILD_E2E_IMAGE=$(GUILD_E2E_IMAGE) GUILD_E2E_MODE=$(GUILD_E2E_MODE) \
+		$(GO) test -count=1 -timeout 15m -v ./test/e2e/
+
+# e2e runs via a recursive $(MAKE) step (not a second prerequisite):
+# sibling prerequisites have no ordering guarantee under `make -j`, and
+# the suite must not start before the image exists.
+.PHONY: e2e-docker
+e2e-docker: docker-build ## Build the Docker image, then run the e2e scenario suite against it
+	$(MAKE) e2e
+
+.PHONY: e2e-update
+e2e-update: ## Regenerate test/e2e/golden/ transcripts from a live run (review the diff before committing)
+	GUILD_E2E_DOCKER=1 GUILD_E2E_IMAGE=$(GUILD_E2E_IMAGE) GUILD_E2E_MODE=$(GUILD_E2E_MODE) GUILD_E2E_UPDATE=1 \
+		$(GO) test -count=1 -timeout 15m -v ./test/e2e/
+
+# ----------------------------------------------------------------------
 # CI (mirrors .github/workflows/*.yml)
 # ----------------------------------------------------------------------
 
