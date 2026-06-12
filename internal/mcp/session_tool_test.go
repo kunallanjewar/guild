@@ -7,6 +7,7 @@ import (
 	"testing"
 	"unicode"
 
+	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
 )
@@ -504,5 +505,167 @@ func TestHandleSessionStart_BoardSummaryCountsMatchData(t *testing.T) {
 	}
 	if !strings.Contains(boardLine, "1 echoes") {
 		t.Errorf("board line %q: expected '1 echoes'", boardLine)
+	}
+}
+
+// seedSessionBoard registers pid and populates every full-snapshot
+// section with real content: a briefing and one unclaimed quest in the
+// quest DB, plus one current principle in the lore DB so the oath wall
+// is non-empty. Both DBs live under the isolateHome(t) sandbox.
+func seedSessionBoard(t *testing.T, ctx context.Context, pid string) {
+	t.Helper()
+
+	qdb, err := openQuestDB(ctx)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	defer func() { _ = qdb.Close() }()
+	if err := project.Register(ctx, qdb, pid, "/fake/"+pid, "TASKS.md"); err != nil {
+		t.Fatalf("project.Register: %v", err)
+	}
+	if err := quest.Brief(ctx, qdb, pid, "handoff context for the next agent", "agent-a"); err != nil {
+		t.Fatalf("quest.Brief: %v", err)
+	}
+	if _, err := quest.Post(ctx, qdb, pid, quest.PostParams{Subject: "seeded task"}); err != nil {
+		t.Fatalf("quest.Post: %v", err)
+	}
+
+	ldb, err := openLoreDB(ctx)
+	if err != nil {
+		t.Fatalf("open lore db: %v", err)
+	}
+	defer func() { _ = ldb.Close() }()
+	// The lore DB keeps its own projects table; entries.project_id has a
+	// foreign key against it, so register there too before inscribing.
+	if err := project.Register(ctx, ldb, pid, "/fake/"+pid, "TASKS.md"); err != nil {
+		t.Fatalf("project.Register (lore): %v", err)
+	}
+	if _, err := lore.Inscribe(ctx, ldb, &lore.InscribeParams{
+		ProjectID: pid,
+		Kind:      lore.KindPrinciple,
+		Title:     "seeded principle",
+		Summary:   "keep the tests hermetic",
+		Topic:     "testing",
+		NoWarn:    true,
+	}); err != nil {
+		t.Fatalf("lore.Inscribe: %v", err)
+	}
+}
+
+// TestHandleSessionStart_BriefOnlyTrimsPayload asserts that
+// brief_only=true on a seeded board returns only the narration header
+// plus the last briefing: no oath, echo, bounty, parallelism, or
+// board-summary sections, and a strictly smaller payload than the
+// default full snapshot. The board-summary suppression matters because
+// brief-only mode skips the oath/echo loaders and the bounty scan, so
+// any counts shown would be misleading zeros.
+func TestHandleSessionStart_BriefOnlyTrimsPayload(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "brief-only-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	fullRes, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart (default): %v", err)
+	}
+	if fullRes.IsError {
+		t.Fatalf("default call returned IsError; content: %v", fullRes.Content)
+	}
+	fullBody := textOf(fullRes.Content)
+
+	briefRes, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: true})
+	if err != nil {
+		t.Fatalf("handleSessionStart (brief_only): %v", err)
+	}
+	if briefRes.IsError {
+		t.Fatalf("brief_only call returned IsError; content: %v", briefRes.Content)
+	}
+	briefBody := textOf(briefRes.Content)
+
+	// Present: active-project header and the seeded briefing.
+	for _, want := range []string{
+		"📍 active project: " + pid,
+		"📋 last briefing",
+		"handoff context for the next agent",
+	} {
+		if !strings.Contains(briefBody, want) {
+			t.Errorf("brief_only body missing %q; got:\n%s", want, briefBody)
+		}
+	}
+
+	// Absent: every non-briefing section, including the board-summary
+	// counts line (it would read "0 oaths, 0 bounties, 0 echoes" despite
+	// the seeded board).
+	for _, banned := range []string{
+		"📊 board:",
+		"⚔️",
+		"👻",
+		"🎯",
+		"⚡",
+		"seeded principle",
+		"seeded task",
+	} {
+		if strings.Contains(briefBody, banned) {
+			t.Errorf("brief_only body must not contain %q; got:\n%s", banned, briefBody)
+		}
+	}
+
+	if len(briefBody) >= len(fullBody) {
+		t.Errorf("brief_only body (%d bytes) not strictly smaller than default body (%d bytes)",
+			len(briefBody), len(fullBody))
+	}
+}
+
+// TestHandleSessionStart_DefaultPathUnchanged is the regression guard
+// for the brief_only plumbing: with the arg omitted (or explicitly
+// false, the same zero value) the response must still be the full
+// snapshot, with the board-summary counts reflecting the seeded data
+// and every section populated.
+func TestHandleSessionStart_DefaultPathUnchanged(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "default-path-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	res, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("default call returned IsError; content: %v", res.Content)
+	}
+	body := textOf(res.Content)
+
+	for _, want := range []string{
+		"📍 active project: " + pid,
+		// Real counts from the seeded board: 1 principle, 1 unclaimed
+		// quest, 0 echoes (the fresh principle is not stale).
+		"📊 board: 1 oaths, 1 bounties, 0 echoes",
+		"📋 last briefing",
+		"handoff context for the next agent",
+		"⚔️ 1 oath(s):",
+		"seeded principle",
+		"👻 fading echoes",
+		"🎯 top bounty:",
+		"seeded task",
+		"⚡ parallelism",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("default body missing %q; got:\n%s", want, body)
+		}
+	}
+
+	// Explicit false must produce the identical payload: omitted and
+	// false are the same input, and the render is deterministic for a
+	// fixed DB state.
+	resFalse, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: false})
+	if err != nil {
+		t.Fatalf("handleSessionStart (brief_only=false): %v", err)
+	}
+	if got := textOf(resFalse.Content); got != body {
+		t.Errorf("brief_only=false body differs from arg-omitted body:\nomitted:\n%s\nfalse:\n%s", body, got)
 	}
 }
