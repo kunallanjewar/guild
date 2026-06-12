@@ -17,8 +17,8 @@ import (
 // same Embedder and ModelID as the lore side.
 //
 // Lifecycle:
-//   - Created once per server rebuild in Register(). Stored in
-//     currentQuestEmbedProvider so buildMCPCommandDeps can wire it into
+//   - Created once per provider bundle in NewProviders. Stored in
+//     Providers.questEmbed so buildMCPCommandDeps can wire it into
 //     command.Deps.Embed.
 //   - ResolveQuestEmbedDeps is called at the top of every quest_search handler
 //     entry. On the common path (state unchanged since last resolve) it is one

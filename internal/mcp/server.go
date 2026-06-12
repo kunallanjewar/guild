@@ -24,6 +24,127 @@ const serverName = "guild"
 // matures; until then, hand-updated.
 const serverVersion = "0.1.0-dev"
 
+// SessionStore is the session-identity seam: how one server instance
+// resolves and persists its active project. The stdio server defaults
+// to the per-process store (the ~/.guild/sessions/<pid>.json file keyed
+// by os.Getpid()); a host serving several sessions from one process
+// supplies one store per connection so concurrent sessions cannot
+// clobber each other's active project.
+//
+// session.Manager satisfies this interface, so callers can pass
+// session.Manager{BaseDir: ..., PID: ...} directly.
+type SessionStore interface {
+	// ResolveForMCP returns the project id for a tool call given the
+	// optional explicit arg and the GUILD_PROJECT env value. See
+	// session.ResolveForMCP for the resolution order.
+	ResolveForMCP(ctx context.Context, arg, env string) (string, error)
+	// SetActiveProject persists the active project for this session.
+	SetActiveProject(ctx context.Context, name string) error
+}
+
+// Compile-time check: session.Manager is a valid SessionStore, so
+// callers can inject per-connection identities without an adapter.
+var _ SessionStore = session.Manager{}
+
+// processSessionStore is the default SessionStore. It delegates to the
+// package-level session helpers, which resolve $HOME and os.Getpid() on
+// every call; that lazy resolution is load-bearing for tests that move
+// HOME between calls (see session/state.go defaultManager).
+type processSessionStore struct{}
+
+func (processSessionStore) ResolveForMCP(ctx context.Context, arg, env string) (string, error) {
+	return session.ResolveForMCP(ctx, arg, env)
+}
+
+func (processSessionStore) SetActiveProject(ctx context.Context, name string) error {
+	return session.SetActiveProject(ctx, name)
+}
+
+// serverCore carries the per-server-instance seams every tool handler
+// closes over: which session identity resolves and persists the active
+// project, and which provider bundle supplies embedders and hints.
+// One core per constructed server; the handlers registered on a server
+// reference exactly one core for their whole lifetime.
+type serverCore struct {
+	sessions  SessionStore
+	providers *Providers
+}
+
+// Options configures server construction. The zero value reproduces the
+// stdio server's defaults exactly; hosts that serve more than one
+// session per OS process override the seams they need.
+type Options struct {
+	// Instructions is the INSTRUCTIONS string advertised to the host on
+	// initialize. Empty means the static contract (instructions.md)
+	// without baked principles, the same default the test and docgen
+	// paths use. The stdio path passes the dynamically resolved string.
+	Instructions string
+
+	// Sessions is the session-identity store handlers resolve and
+	// persist the active project through. Nil means the per-process
+	// default (~/.guild/sessions/<os.Getpid()>.json).
+	Sessions SessionStore
+
+	// Providers is an externally owned provider bundle. Nil means the
+	// server constructs a fresh default bundle (the stdio behavior). A
+	// multi-session host builds one bundle via NewProviders and passes
+	// it to every per-connection NewServer call so the embedder, hints
+	// engine, and backfill trigger are constructed once per process,
+	// not once per connection. Building against a supplied bundle never
+	// resets or closes the bundle's state.
+	//
+	// Concurrent NewServer calls must supply Providers: the default
+	// bundle construction updates the per-process tracker and is not
+	// safe to race (same constraint the package-level singletons had
+	// before the bundle existed).
+	Providers *Providers
+}
+
+// NewServer constructs a fully registered guild MCP server from opts.
+// This is the construction seam for hosts that build several servers in
+// one process; Serve, build, and BuildForDocs all route through it with
+// default options.
+func NewServer(opts Options) (*sdkmcp.Server, error) {
+	instructions := opts.Instructions
+	if instructions == "" {
+		instructions = staticInstructions
+	}
+	sessions := opts.Sessions
+	if sessions == nil {
+		sessions = processSessionStore{}
+	}
+	providers := opts.Providers
+	if providers == nil {
+		providers = newProcessProviders()
+	}
+
+	logger := newLogger()
+
+	s := sdkmcp.NewServer(
+		&sdkmcp.Implementation{
+			Name:    serverName,
+			Version: serverVersion,
+		},
+		&sdkmcp.ServerOptions{
+			// Instructions is the agent-visible contract loaded at
+			// initialize. See instructions.go for the journal of
+			// adjustments.
+			Instructions: instructions,
+			// Logger routes SDK-internal events (session connect,
+			// handler panics, malformed messages) through our
+			// stderr-bound slog handler. Stdout remains JSON-RPC
+			// only.
+			Logger: logger,
+		},
+	)
+
+	// Register all tools (bootstrap + always-on) against this server's
+	// core. See register.go.
+	registerAll(s, &serverCore{sessions: sessions, providers: providers})
+
+	return s, nil
+}
+
 // Serve constructs the guild MCP server and runs it on the stdio
 // transport until ctx is cancelled or the client closes the session.
 //
@@ -35,7 +156,8 @@ const serverVersion = "0.1.0-dev"
 //     (static contract + active project's principles) in
 //     [sdkmcp.ServerOptions] so the host loads the full discipline
 //     contract during `initialize`.
-//  3. Register all tools via Register().
+//  3. Register all tools against a default per-process core (per-PID
+//     session identity, fresh provider bundle). See register.go.
 //  4. Run over [sdkmcp.StdioTransport] — the SDK handles the JSON-RPC
 //     framing, keep-alive, and cancellation plumbing.
 //
@@ -82,7 +204,7 @@ func BuildForDocs() (*sdkmcp.Server, error) {
 // build constructs the server with static-only INSTRUCTIONS. Used by
 // tests and BuildForDocs so they don't touch the real lore DB.
 func build() (*sdkmcp.Server, error) {
-	return buildServerWithInstructions(staticInstructions)
+	return NewServer(Options{})
 }
 
 // buildWithContext constructs the server with dynamically baked
@@ -112,7 +234,7 @@ func buildWithContext(ctx context.Context) (*sdkmcp.Server, error) {
 
 	instructions := resolveInstructions(ctx, logger)
 
-	return buildServerWithInstructions(instructions)
+	return NewServer(Options{Instructions: instructions})
 }
 
 // resolveInstructions tries to build the dynamic INSTRUCTIONS string.
@@ -157,35 +279,4 @@ func resolveInstructions(ctx context.Context, logger *slog.Logger) string {
 	)
 
 	return instructions
-}
-
-// buildServerWithInstructions is the shared server-construction core.
-// Called by both build() (static-only, test-friendly) and buildWithContext
-// (dynamic, production path). Separated so the two call sites share
-// identical server + tool registration without duplication.
-func buildServerWithInstructions(instructions string) (*sdkmcp.Server, error) {
-	logger := newLogger()
-
-	s := sdkmcp.NewServer(
-		&sdkmcp.Implementation{
-			Name:    serverName,
-			Version: serverVersion,
-		},
-		&sdkmcp.ServerOptions{
-			// Instructions is the agent-visible contract loaded at
-			// initialize. See instructions.go for the journal of
-			// adjustments.
-			Instructions: instructions,
-			// Logger routes SDK-internal events (session connect,
-			// handler panics, malformed messages) through our
-			// stderr-bound slog handler. Stdout remains JSON-RPC
-			// only.
-			Logger: logger,
-		},
-	)
-
-	// Register all tools (bootstrap + always-on). See register.go.
-	Register(s)
-
-	return s, nil
 }

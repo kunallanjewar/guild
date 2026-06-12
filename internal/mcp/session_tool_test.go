@@ -153,7 +153,7 @@ func TestHandleSessionStart_ExplicitProjectSkipsInference(t *testing.T) {
 		},
 	}
 
-	res, _, callErr := handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	res, _, callErr := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
 	if callErr != nil {
 		t.Fatalf("handleSessionStart: %v", callErr)
 	}
@@ -185,7 +185,7 @@ func TestHandleSessionStart_InferenceSucceeds(t *testing.T) {
 
 	withStubbedResolver(t, projDir, nil)
 
-	res, _, callErr := handleSessionStart(ctx, nil, sessionStartInput{Project: ""})
+	res, _, callErr := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: ""})
 	if callErr != nil {
 		t.Fatalf("handleSessionStart: %v", callErr)
 	}
@@ -210,7 +210,7 @@ func TestHandleSessionStart_InferenceFailureIsRecoverable(t *testing.T) {
 
 	withStubbedResolver(t, "/tmp/unregistered", project.ErrNotInGitRepo)
 
-	res, _, callErr := handleSessionStart(ctx, nil, sessionStartInput{Project: ""})
+	res, _, callErr := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: ""})
 	if callErr != nil {
 		t.Fatalf("handleSessionStart must not return a protocol error (agent cannot recover): %v", callErr)
 	}
@@ -274,7 +274,7 @@ func TestHandleSessionStart_WorktreeFallbackNarration(t *testing.T) {
 
 	withStubbedWorktreeResolver(t, worktreePath, mainRepoPath)
 
-	res, _, callErr := handleSessionStart(ctx, nil, sessionStartInput{Project: ""})
+	res, _, callErr := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: ""})
 	if callErr != nil {
 		t.Fatalf("handleSessionStart: %v", callErr)
 	}
@@ -387,7 +387,7 @@ func TestHandleSessionStart_OpenerEmojiPrefix(t *testing.T) {
 	}
 	_ = db.Close()
 
-	res, _, callErr := handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	res, _, callErr := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
 	if callErr != nil {
 		t.Fatalf("handleSessionStart: %v", callErr)
 	}
@@ -566,7 +566,7 @@ func TestHandleSessionStart_BriefOnlyTrimsPayload(t *testing.T) {
 	const pid = "brief-only-proj"
 	seedSessionBoard(t, ctx, pid)
 
-	fullRes, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	fullRes, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
 	if err != nil {
 		t.Fatalf("handleSessionStart (default): %v", err)
 	}
@@ -575,7 +575,7 @@ func TestHandleSessionStart_BriefOnlyTrimsPayload(t *testing.T) {
 	}
 	fullBody := textOf(fullRes.Content)
 
-	briefRes, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: true})
+	briefRes, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: true})
 	if err != nil {
 		t.Fatalf("handleSessionStart (brief_only): %v", err)
 	}
@@ -630,7 +630,7 @@ func TestHandleSessionStart_DefaultPathUnchanged(t *testing.T) {
 	const pid = "default-path-proj"
 	seedSessionBoard(t, ctx, pid)
 
-	res, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	res, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
 	if err != nil {
 		t.Fatalf("handleSessionStart: %v", err)
 	}
@@ -661,7 +661,7 @@ func TestHandleSessionStart_DefaultPathUnchanged(t *testing.T) {
 	// Explicit false must produce the identical payload: omitted and
 	// false are the same input, and the render is deterministic for a
 	// fixed DB state.
-	resFalse, _, err := handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: false})
+	resFalse, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: false})
 	if err != nil {
 		t.Fatalf("handleSessionStart (brief_only=false): %v", err)
 	}
