@@ -578,7 +578,7 @@ func buildCLILoreDeps() command.Deps {
 			defer func() { _ = db.Close() }()
 			p, err := project.Resolve(ctx, db, strings.TrimSpace(argProject))
 			if err != nil {
-				return "", err
+				return "", wrapResolveHint(err)
 			}
 			return p.ID, nil
 		},
