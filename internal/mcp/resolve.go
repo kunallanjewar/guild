@@ -79,11 +79,13 @@ func (c *serverCore) resolveProjectAutoBootstrap(ctx context.Context, argProject
 	//   - ErrNotInGitRepo → "not inside a git repository"
 	//   - ErrNotRegistered → "project X not registered — run 'guild init'"
 	//
-	// inferProjectFromCWD returns (projectID, viaWorktreeFallback, err) per
-	// QUEST-67. The fallback flag signals the resolver used the worktree's
-	// main-repo path — we surface it in the narration so the agent+user see
-	// how the project was reached.
-	inferred, viaWorktreeFallback, inferErr := inferProjectFromCWD(ctx)
+	// inferProject returns (projectID, viaWorktreeFallback, err) per
+	// QUEST-67, anchored on this server's connection cwd (process cwd on
+	// the stdio path, shim preamble cwd on the daemon path). The fallback
+	// flag signals the resolver used the worktree's main-repo path; we
+	// surface it in the narration so the agent+user see how the project
+	// was reached.
+	inferred, viaWorktreeFallback, inferErr := c.inferProject(ctx)
 	if inferErr != nil {
 		// Auto-inference failed; return the original "no active project" error
 		// so the agent gets the standard bootstrap guidance, not a confusing

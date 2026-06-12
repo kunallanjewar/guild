@@ -62,12 +62,26 @@ func (processSessionStore) SetActiveProject(ctx context.Context, name string) er
 
 // serverCore carries the per-server-instance seams every tool handler
 // closes over: which session identity resolves and persists the active
-// project, and which provider bundle supplies embedders and hints.
+// project, which provider bundle supplies embedders and hints, and
+// which working directory anchors cwd-based project inference.
 // One core per constructed server; the handlers registered on a server
 // reference exactly one core for their whole lifetime.
 type serverCore struct {
 	sessions  SessionStore
 	providers *Providers
+
+	// cwd anchors project auto-inference for this server instance.
+	// Empty means the process working directory (the stdio default);
+	// the daemon sets it to the shim's preamble cwd so concurrent
+	// sessions from different checkouts resolve independently.
+	cwd string
+}
+
+// inferProject resolves the project from this server's connection cwd:
+// the shim preamble cwd for daemon sessions, the process cwd for the
+// stdio server. See inferProjectFromDir.
+func (c *serverCore) inferProject(ctx context.Context) (projectID string, viaFallback bool, err error) {
+	return inferProjectFromDir(ctx, c.cwd)
 }
 
 // Options configures server construction. The zero value reproduces the
@@ -98,6 +112,15 @@ type Options struct {
 	// safe to race (same constraint the package-level singletons had
 	// before the bundle existed).
 	Providers *Providers
+
+	// CWD anchors cwd-based project auto-inference for this server
+	// instance (guild_session_start with no arg and the implicit
+	// auto-bootstrap path). Empty means the process working directory,
+	// which is correct for the stdio server. The daemon passes each
+	// connection's shim preamble cwd so sessions resolve against the
+	// directory the agent is actually working in, not wherever the
+	// daemon happened to start.
+	CWD string
 }
 
 // NewServer constructs a fully registered guild MCP server from opts.
@@ -140,7 +163,7 @@ func NewServer(opts Options) (*sdkmcp.Server, error) {
 
 	// Register all tools (bootstrap + always-on) against this server's
 	// core. See register.go.
-	registerAll(s, &serverCore{sessions: sessions, providers: providers})
+	registerAll(s, &serverCore{sessions: sessions, providers: providers, cwd: opts.CWD})
 
 	return s, nil
 }
@@ -237,18 +260,28 @@ func buildWithContext(ctx context.Context) (*sdkmcp.Server, error) {
 	return NewServer(Options{Instructions: instructions})
 }
 
-// resolveInstructions tries to build the dynamic INSTRUCTIONS string.
+// resolveInstructions tries to build the dynamic INSTRUCTIONS string
+// for the stdio server: per-process session identity, process cwd.
 // Falls back to staticInstructions on any resolution or DB error.
 // Logs the outcome at debug level for observability (QUEST-57 measurement hook).
 func resolveInstructions(ctx context.Context, logger *slog.Logger) string {
-	// Step 1+2: check per-PID session file and GUILD_PROJECT env var.
-	project, err := session.ResolveForMCP(ctx, "", os.Getenv(guildProjectEnv))
+	return resolveInstructionsFor(ctx, logger, processSessionStore{}, "")
+}
+
+// resolveInstructionsFor is resolveInstructions generalized over the
+// session identity and the inference cwd, so the daemon can build each
+// connection's INSTRUCTIONS against the shim's session file and the
+// shim's working directory instead of the daemon's own. dir == ""
+// means the process working directory (the stdio default).
+func resolveInstructionsFor(ctx context.Context, logger *slog.Logger, store SessionStore, dir string) string {
+	// Step 1+2: check the session identity's file and GUILD_PROJECT env var.
+	project, err := store.ResolveForMCP(ctx, "", os.Getenv(guildProjectEnv))
 	if err != nil {
-		// No project from session file or env — try CWD auto-inference (step 3).
-		// inferProjectFromCWD returns (projectID, viaWorktreeFallback, err); the
+		// No project from session file or env: try cwd auto-inference (step 3).
+		// inferProjectFromDir returns (projectID, viaWorktreeFallback, err); the
 		// fallback flag is only material to handleSessionStart's narration, not
 		// to INSTRUCTIONS building — discard it here.
-		inferred, _, ierr := inferProjectFromCWD(ctx)
+		inferred, _, ierr := inferProjectFromDir(ctx, dir)
 		if ierr != nil {
 			// All resolution paths exhausted — static-only fallback.
 			logger.Debug("mcp: instructions: no active project at connect; using static-only INSTRUCTIONS",
