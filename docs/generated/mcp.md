@@ -62,6 +62,10 @@ _no arguments_
 {
   "additionalProperties": false,
   "properties": {
+    "brief_only": {
+      "description": "when true, return only the last briefing",
+      "type": "boolean"
+    },
     "project": {
       "description": "directory basename, e.g. 'guild'. Optional — when omitted, auto-infers from the MCP server's cwd via git-toplevel lookup. Pass explicitly to override or when cwd auto-inference can't reach the project. Auto-infer handles git worktrees — falls back to the main-repo path if the worktree path isn't registered.",
       "type": "string"

@@ -46,6 +46,13 @@ var mcpProjectResolver = project.DefaultResolver
 // deliberately small so the other tools can follow the same pattern
 // without repeating the same workflow guidance.
 type sessionStartInput struct {
+	// BriefOnly narrows the response to the narration header plus the
+	// last briefing, skipping the oath, echoes, bounty, parallelism,
+	// and board-summary sections. Same tag pair as
+	// questBountiesInput.BriefOnly and guildStatusInput.BriefOnly so
+	// all three tools present one consistent arg.
+	BriefOnly bool `json:"brief_only,omitempty" jsonschema:"when true, return only the last briefing"`
+
 	// Project is the directory basename of the project to activate.
 	// Optional — when omitted, the handler auto-infers the project by
 	// running `git rev-parse --show-toplevel` in the MCP server's cwd
@@ -152,14 +159,17 @@ func handleSessionStart(
 	// renderBounties always returns a non-empty structural block:
 	// section headers render even on an empty project so first-time
 	// users see the shape (QUEST-1).
-	body, bountiesRes := renderBounties(ctx, name, false /* briefOnly */)
+	body, bountiesRes := renderBounties(ctx, name, in.BriefOnly)
 	if body == "" {
 		body = emptyBountiesSkeleton()
 	}
 
 	// Board-summary line: counts at a glance for Codex-class collapsed views.
+	// Suppressed in brief-only mode: the oath/echo loaders and the bounty
+	// scan are skipped there, so the counts would all read zero regardless
+	// of the real board state.
 	var boardLine string
-	if bountiesRes != nil {
+	if bountiesRes != nil && !in.BriefOnly {
 		oathCount := len(bountiesRes.Oath)
 		bountyCount := len(bountiesRes.AllNext)
 		echoCount := len(bountiesRes.Echoes)
@@ -189,41 +199,46 @@ func renderBounties(ctx context.Context, projectID string, briefOnly bool) (stri
 
 	// Optional lore wiring: if the lore DB is unreachable we still
 	// surface quest bounties without oath/echoes. Matches the CLI's
-	// graceful-degradation pattern in quest_agent.go.
+	// graceful-degradation pattern in quest_agent.go. Skipped entirely
+	// in brief-only mode: the oath/echo/health reads would be discarded
+	// there, so the lore DB is never opened (previously a brief-only
+	// call opened the handle and leaked it, since the deferred close
+	// only ran on the full path).
 	var oathLoader quest.OathLoader
 	var echoLoader quest.EchoLoader
 	var embedderHealthLine string
-	loreDB, loreErr := openLoreDB(ctx)
-	if loreErr == nil && !briefOnly {
-		defer func() { _ = loreDB.Close() }()
-		oathLoader = func(ctx context.Context, proj string) ([]quest.OathEntry, error) {
-			entries, err := lore.Oath(ctx, loreDB, proj)
-			if err != nil {
-				return nil, err
+	if !briefOnly {
+		if loreDB, loreErr := openLoreDB(ctx); loreErr == nil {
+			defer func() { _ = loreDB.Close() }()
+			oathLoader = func(ctx context.Context, proj string) ([]quest.OathEntry, error) {
+				entries, err := lore.Oath(ctx, loreDB, proj)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]quest.OathEntry, len(entries))
+				for i, e := range entries {
+					out[i] = quest.OathEntry{Title: e.Title, Summary: e.Summary}
+				}
+				return out, nil
 			}
-			out := make([]quest.OathEntry, len(entries))
-			for i, e := range entries {
-				out[i] = quest.OathEntry{Title: e.Title, Summary: e.Summary}
+			echoLoader = func(ctx context.Context, proj string) ([]quest.EchoEntry, error) {
+				echoes, err := lore.Echoes(ctx, loreDB, proj, false)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]quest.EchoEntry, len(echoes))
+				for i, e := range echoes {
+					out[i] = quest.EchoEntry{Title: e.Entry.Title, Reason: e.Reason}
+				}
+				return out, nil
 			}
-			return out, nil
-		}
-		echoLoader = func(ctx context.Context, proj string) ([]quest.EchoEntry, error) {
-			echoes, err := lore.Echoes(ctx, loreDB, proj, false)
-			if err != nil {
-				return nil, err
-			}
-			out := make([]quest.EchoEntry, len(echoes))
-			for i, e := range echoes {
-				out[i] = quest.EchoEntry{Title: e.Entry.Title, Reason: e.Reason}
-			}
-			return out, nil
-		}
 
-		// Read the embedder health line. Failures are swallowed: a missing
-		// meta table (pre-migration DB) must not break session-start.
-		// Only non-healthy states emit a line; healthy state returns "".
-		if report, hErr := embed.ReadHealthReport(ctx, loreDB, embed.LoreCorpus{}); hErr == nil {
-			embedderHealthLine = report.SessionLine()
+			// Read the embedder health line. Failures are swallowed: a missing
+			// meta table (pre-migration DB) must not break session-start.
+			// Only non-healthy states emit a line; healthy state returns "".
+			if report, hErr := embed.ReadHealthReport(ctx, loreDB, embed.LoreCorpus{}); hErr == nil {
+				embedderHealthLine = report.SessionLine()
+			}
 		}
 	}
 
