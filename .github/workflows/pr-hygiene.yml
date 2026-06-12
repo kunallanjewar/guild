@@ -36,6 +36,7 @@ jobs:
             install
             hints
             ci
+            e2e
             release
             docs
             readme
