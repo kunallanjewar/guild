@@ -397,8 +397,12 @@ e2e: ## Run the e2e scenario suite against an existing image (set GUILD_E2E_IMAG
 	GUILD_E2E_DOCKER=1 GUILD_E2E_IMAGE=$(GUILD_E2E_IMAGE) GUILD_E2E_MODE=$(GUILD_E2E_MODE) \
 		$(GO) test -count=1 -timeout 15m -v ./test/e2e/
 
+# e2e runs via a recursive $(MAKE) step (not a second prerequisite):
+# sibling prerequisites have no ordering guarantee under `make -j`, and
+# the suite must not start before the image exists.
 .PHONY: e2e-docker
-e2e-docker: docker-build e2e ## Build the Docker image, then run the e2e scenario suite against it
+e2e-docker: docker-build ## Build the Docker image, then run the e2e scenario suite against it
+	$(MAKE) e2e
 
 .PHONY: e2e-update
 e2e-update: ## Regenerate test/e2e/golden/ transcripts from a live run (review the diff before committing)

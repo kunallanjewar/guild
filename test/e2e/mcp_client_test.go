@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,6 +28,27 @@ import (
 // extraction + model load).
 const callTimeout = 90 * time.Second
 
+// lockedBuffer is a mutex-guarded bytes.Buffer. exec.Cmd copies the
+// server's stderr into it from its own goroutine while rpc error paths
+// read it from the session's goroutine; without the lock that pair is a
+// data race.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // mcpSession is one `guild mcp serve` process inside a scenario
 // container, driven over docker exec stdin/stdout.
 type mcpSession struct {
@@ -34,7 +56,7 @@ type mcpSession struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	msgs   chan json.RawMessage
-	stderr *bytes.Buffer
+	stderr *lockedBuffer
 	nextID int
 }
 
@@ -92,7 +114,7 @@ func (c *container) openSession(ctx context.Context, t *testing.T) *mcpSession {
 	if err != nil {
 		t.Fatalf("mcp session stdout: %v", err)
 	}
-	s := &mcpSession{t: t, cmd: cmd, stdin: stdin, stderr: &bytes.Buffer{}}
+	s := &mcpSession{t: t, cmd: cmd, stdin: stdin, stderr: &lockedBuffer{}}
 	cmd.Stderr = s.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start mcp session: %v", err)

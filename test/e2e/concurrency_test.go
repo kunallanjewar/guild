@@ -38,7 +38,10 @@ var concurrentTitles = [2][5]string{
 // on the same lore index).
 //
 // Phase 1 (concurrent, asserted in code): sessions A and B each inscribe
-// five entries simultaneously. Any error or lost write fails the test.
+// five entries simultaneously, with one mid-stream appraise per writer so
+// reads land while the other session is splicing vectors into the shared
+// index (read-while-splice coverage). Any error or lost write fails the
+// test.
 //
 // Phase 2 (sequential, golden-recorded): a fresh session appraises every
 // title and must get exactly one hit each. Interleaving-dependent values
@@ -66,12 +69,14 @@ func TestE2EConcurrency(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	errs := make(chan error, len(concurrentTitles[0])+len(concurrentTitles[1]))
+	// Capacity: one inscribe error per title plus one read-while-splice
+	// appraise error per writer, so no goroutine ever blocks on send.
+	errs := make(chan error, len(concurrentTitles[0])+len(concurrentTitles[1])+len(sessions))
 	for i, s := range sessions {
 		wg.Add(1)
 		go func(i int, s *mcpSession) {
 			defer wg.Done()
-			for _, title := range concurrentTitles[i] {
+			for j, title := range concurrentTitles[i] {
 				// callToolErr, not callTool: testing.T methods must not
 				// be called from non-test goroutines.
 				out, err := s.callToolErr("lore_inscribe", map[string]any{
@@ -86,6 +91,24 @@ func TestE2EConcurrency(t *testing.T) {
 				}
 				if !strings.Contains(out, title) {
 					errs <- fmt.Errorf("session %d: inscribe %q response missing title:\n%s", i, title, out)
+				}
+				// Mid-stream read: one appraise per writer, fired while the
+				// other session is still inscribing (and splicing vectors
+				// into the shared index). Asserted in code, never recorded:
+				// ranking during partial embed coverage is nondeterministic,
+				// but the just-inscribed title must be retrievable and the
+				// call must not error against an in-flight splice.
+				if j == 2 {
+					probe := concurrentTitles[i][0]
+					out, err := s.callToolErr("lore_appraise", map[string]any{
+						"query": probe,
+						"limit": 5,
+					})
+					if err != nil {
+						errs <- fmt.Errorf("session %d: read-while-splice appraise %q: %w", i, probe, err)
+					} else if !strings.Contains(out, probe) {
+						errs <- fmt.Errorf("session %d: read-while-splice appraise %q missing the entry:\n%s", i, probe, out)
+					}
 				}
 			}
 		}(i, s)

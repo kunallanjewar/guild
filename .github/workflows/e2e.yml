@@ -31,6 +31,9 @@ jobs:
       # Build via buildx with the GitHub Actions layer cache so the Go
       # module download + asset staging layers are reused across runs;
       # a cold build is the slow path, the scenario suite itself is fast.
+      # ignore-error=true: a cache export failure must not fail the step
+      # after the image is already built; the cache is an optimization,
+      # the e2e suite is the point.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
@@ -38,7 +41,7 @@ jobs:
           load: true
           tags: guild:latest
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
           build-args: |
             VERSION=ci
             COMMIT=${{ github.sha }}
