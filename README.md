@@ -100,6 +100,44 @@ The Go toolchain cannot embed assets via `@latest`; this path gives
 you BM25 keyword search but not semantic (vector) retrieval. Use
 `install.sh` or `brew` for the full experience.
 
+**Docker (containerized, state in a named volume):**
+
+```bash
+make docker-build
+docker run --rm -v guild-state:/home/guild/.guild guild:latest --version
+```
+
+The image is a multi-stage build: a pure-Go (`CGO_ENABLED=0`) binary
+compiled with `-tags=withembed`, running as a non-root `guild` user on
+`debian:bookworm-slim`. Semantic retrieval works in-container out of
+the box; the bundled ONNX runtime initializes and passes its probe on
+both `linux/amd64` and `linux/arm64`. If the embedder ever fails to
+initialize (for example on an unsupported platform), guild degrades to
+BM25 keyword retrieval, exactly like a no-embed build, and `guild init`
+reports the reason. It never crashes over a missing embedder.
+
+State isolation: the container's `HOME` is `/home/guild`, and guild
+keeps everything (SQLite databases, config) under `/home/guild/.guild`.
+Mount a named volume there and lore + quests persist across containers;
+without the mount, state dies with the container. The host's `~/.guild`
+is never touched.
+
+```bash
+docker volume create guild-state
+docker run --rm -it -v guild-state:/home/guild/.guild --entrypoint /bin/sh guild:latest
+# inside the container:
+mkdir -p ~/myproject && cd ~/myproject
+guild init --yes
+guild lore inscribe "hello from docker" --kind observation \
+  --summary "First entry written inside the container." \
+  --topic docker --project myproject
+guild lore appraise "hello from docker"
+```
+
+`make docker-test` builds the image and runs this exact smoke flow
+(`--version`, `init`, inscribe/appraise round-trip, persistence across
+containers) against a throwaway volume.
+
 ### 2. Initialize your project
 
 ```bash
