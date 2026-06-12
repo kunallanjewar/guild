@@ -38,7 +38,15 @@ Flags:
 }
 
 func runInstall(d deps, harness string, dryRun bool) error {
-	// Base config first: install owns creating ~/.guild/hooks-base.json.
+	// Validate the --harness filter before anything else, including the
+	// zero-adapters early return below: a misspelled name must error in
+	// every build, not silently exit 0 in an adapter-less one.
+	selected, err := selectAdapters(d.adapters, harness)
+	if err != nil {
+		return err
+	}
+
+	// Base config next: install owns creating ~/.guild/hooks-base.json.
 	basePath, err := hookcfg.BasePath()
 	if err != nil {
 		return err
@@ -85,11 +93,6 @@ func runInstall(d deps, harness string, dryRun bool) error {
 	if len(d.adapters) == 0 {
 		fmt.Fprintln(d.out, "No hook adapters are registered in this build; nothing to install yet.")
 		return nil
-	}
-
-	selected, err := selectAdapters(d.adapters, harness)
-	if err != nil {
-		return err
 	}
 
 	for _, ad := range selected {

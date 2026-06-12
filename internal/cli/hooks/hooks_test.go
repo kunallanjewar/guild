@@ -145,6 +145,22 @@ func TestInstall_UnknownHarnessErrors(t *testing.T) {
 	}
 }
 
+// TestInstall_UnknownHarnessErrorsWithoutAdapters: the --harness value
+// is validated before the zero-adapters early return, so a misspelled
+// name errors in every build instead of silently exiting 0 in an
+// adapter-less one.
+func TestInstall_UnknownHarnessErrorsWithoutAdapters(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+
+	d := testDeps(&out)
+	d.adapters = nil
+	err := runInstall(d, "no-such-harness", false)
+	if err == nil || !strings.Contains(err.Error(), "unknown harness") {
+		t.Errorf("err = %v; want unknown harness error", err)
+	}
+}
+
 // TestSync_DriftRepairAndIdempotent: editing the base config makes the
 // target drift; sync repairs it; a second sync is a no-op; dry-run
 // never writes.
@@ -204,6 +220,91 @@ func TestSync_DriftRepairAndIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "in sync (no-op)") {
 		t.Errorf("second sync output missing no-op line:\n%s", out.String())
+	}
+}
+
+// TestSync_ThreeRunsByteIdentical: regression test for the duplication
+// bug where repeated syncs appended the desired groups over and over.
+// With a valid (guild-only) base, three consecutive syncs leave the
+// settings file byte-identical and the third run reports in-sync.
+func TestSync_ThreeRunsByteIdentical(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out bytes.Buffer
+
+	if err := runInstall(testDeps(&out), "", false); err != nil {
+		t.Fatalf("runInstall: %v", err)
+	}
+
+	// Edit the base to a different (still guild-owned) command so the
+	// first sync has real work to do.
+	custom := hookcfg.DefaultBase()
+	custom["SessionStart"][0].Hooks[0].Command = "guild quest brief --auto --depth 2"
+	if err := hookcfg.SaveBase(custom); err != nil {
+		t.Fatalf("SaveBase: %v", err)
+	}
+
+	var snapshots [3][]byte
+	for i := range snapshots {
+		out.Reset()
+		if err := runSync(testDeps(&out), false); err != nil {
+			t.Fatalf("runSync #%d: %v", i+1, err)
+		}
+		raw, err := os.ReadFile(settingsPath(t, home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshots[i] = raw
+	}
+
+	if !bytes.Equal(snapshots[0], snapshots[1]) || !bytes.Equal(snapshots[1], snapshots[2]) {
+		t.Error("repeated syncs changed the settings file; sync is not idempotent")
+	}
+	if !strings.Contains(out.String(), "in sync (no-op)") {
+		t.Errorf("third sync output missing in-sync no-op line:\n%s", out.String())
+	}
+}
+
+// TestSync_ForeignBaseFailsLoud: end-to-end check of the reviewer
+// repro. A hand-edited base config containing a custom (non-guild)
+// command must make sync fail with the actionable validation error and
+// write nothing, instead of duplicating the command into the settings
+// file on every run.
+func TestSync_ForeignBaseFailsLoud(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out bytes.Buffer
+
+	if err := runInstall(testDeps(&out), "", false); err != nil {
+		t.Fatalf("runInstall: %v", err)
+	}
+	before, err := os.ReadFile(settingsPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Written by hand: SaveBase would already reject this.
+	raw := []byte(`{
+  "SessionStart": [
+    {"matcher": "startup", "hooks": [{"type": "command", "command": "echo my-custom-thing"}]}
+  ]
+}`)
+	if err := os.WriteFile(basePath(t, home), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	err = runSync(testDeps(&out), false)
+	if err == nil || !strings.Contains(err.Error(), "not a guild command") {
+		t.Fatalf("runSync err = %v; want non-guild command validation error", err)
+	}
+
+	after, err := os.ReadFile(settingsPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("sync modified the settings file despite the invalid base config")
 	}
 }
 

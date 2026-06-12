@@ -178,6 +178,65 @@ func TestLoadBase_UserOverrideWins(t *testing.T) {
 	}
 }
 
+// TestLoadBase_ForeignCommandFailsLoud: a base config containing a
+// non-guild command must error at load with an actionable message. The
+// ownership model manages only commands matching ^guild( |$); letting a
+// foreign command through would make sync duplicate it into the
+// harness settings file on every run.
+func TestLoadBase_ForeignCommandFailsLoud(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := filepath.Join(home, ".guild")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{
+  "SessionStart": [
+    {"matcher": "startup", "hooks": [{"type": "command", "command": "echo my-custom-thing"}]}
+  ]
+}`)
+	if err := os.WriteFile(filepath.Join(dir, "hooks-base.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadBase()
+	if err == nil {
+		t.Fatal("LoadBase accepted a base config with a non-guild command; want error")
+	}
+	for _, want := range []string{
+		`"echo my-custom-thing"`,
+		"not a guild command",
+		"harness settings file",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+}
+
+// TestSaveBase_ForeignCommandRejected: the write path enforces the same
+// invariant, so guild itself can never persist a base config that sync
+// cannot reconcile. Nothing is written on rejection.
+func TestSaveBase_ForeignCommandRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := Config{
+		"SessionStart": {{Matcher: "startup", Hooks: []Command{{Type: "command", Command: "echo my-custom-thing"}}}},
+	}
+	err := SaveBase(cfg)
+	if err == nil {
+		t.Fatal("SaveBase accepted a non-guild command; want error")
+	}
+	if !strings.Contains(err.Error(), "not a guild command") {
+		t.Errorf("error %q missing %q", err, "not a guild command")
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".guild", "hooks-base.json")); !os.IsNotExist(statErr) {
+		t.Errorf("SaveBase wrote a file despite validation failure (stat err: %v)", statErr)
+	}
+}
+
 // TestWriteFileAtomic covers the write primitive: content lands, perms
 // hold, an existing file is replaced, and no tmp files leak.
 func TestWriteFileAtomic(t *testing.T) {

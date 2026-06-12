@@ -44,6 +44,13 @@
 // harness. Per-project or per-event overrides are out of scope for now
 // (global config only).
 //
+// Every command in the base config must be a guild command (matching
+// ^guild( |$), see merge.go); LoadBase and SaveBase reject anything
+// else. The ownership model only manages guild commands: a non-guild
+// command written by sync would be classified foreign on the next scan
+// and duplicated on every subsequent run. Custom hooks belong directly
+// in the harness settings file, where sync preserves them untouched.
+//
 // The base config is harness-agnostic. Adapters (see the adapters
 // subpackage) render it into each harness's native settings format and
 // apply Substitute for adapter-specific placeholders.
@@ -55,6 +62,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/mathomhaus/guild/internal/guildpath"
 )
@@ -134,12 +142,40 @@ func BasePath() (string, error) {
 	return filepath.Join(home, ".guild", baseFileName), nil
 }
 
+// ValidateBase rejects any base config containing a non-guild command.
+// The ownership model (see merge.go) manages only commands matching
+// ^guild( |$): a non-guild command rendered into a harness settings
+// file would be classified foreign on the next scan, so sync could
+// never reconcile it and would duplicate it on every run. Failing loud
+// here keeps that corruption impossible.
+func ValidateBase(cfg Config) error {
+	events := make([]string, 0, len(cfg))
+	for ev := range cfg {
+		events = append(events, ev)
+	}
+	sort.Strings(events)
+	for _, ev := range events {
+		for _, g := range cfg[ev] {
+			for _, h := range g.Hooks {
+				if !CommandIsGuild(h.Command) {
+					return fmt.Errorf("event %s: command %q is not a guild command: "+
+						"the base config manages only commands matching ^guild( |$); "+
+						"put custom hooks directly in your harness settings file instead "+
+						"(guild hooks sync preserves them untouched)", ev, h.Command)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // LoadBase reads ~/.guild/hooks-base.json. A missing file is not an
 // error: the built-in defaults are returned instead, so read-only verbs
 // (sync/diff/list/scan) work before `guild hooks install` ever ran. A
 // file that exists but does not parse is an error; silently falling
 // back to defaults would make sync clobber a config the user was
-// mid-edit on.
+// mid-edit on. A file containing a non-guild command is also an error
+// (see ValidateBase).
 func LoadBase() (Config, error) {
 	path, err := BasePath()
 	if err != nil {
@@ -158,12 +194,19 @@ func LoadBase() (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("hooks: parse %s: %w", path, err)
 	}
+	if err := ValidateBase(cfg); err != nil {
+		return nil, fmt.Errorf("hooks: invalid base config %s: %w", path, err)
+	}
 	return cfg, nil
 }
 
 // SaveBase writes cfg to ~/.guild/hooks-base.json atomically, creating
-// ~/.guild (0700) if needed.
+// ~/.guild (0700) if needed. Configs containing non-guild commands are
+// rejected (see ValidateBase).
 func SaveBase(cfg Config) error {
+	if err := ValidateBase(cfg); err != nil {
+		return fmt.Errorf("hooks: refusing to write base config: %w", err)
+	}
 	if _, err := guildpath.EnsureGuildDir(); err != nil {
 		return err
 	}

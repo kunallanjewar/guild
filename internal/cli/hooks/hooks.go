@@ -43,6 +43,11 @@ groups: a hook group is guild-owned only when every command in it
 starts with 'guild'. Everything else in your settings files is
 preserved untouched.
 
+The base config holds guild commands only; a command that does not
+start with 'guild' is rejected when the file is read. Custom hooks
+belong directly in the harness settings file, where sync preserves
+them untouched.
+
 Status vocabulary used by list/diff:
   in-sync   guild-owned hooks match the base config
   drift     guild-owned hooks present but differ from the base config
