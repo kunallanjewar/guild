@@ -49,7 +49,10 @@ mcp__guild__guild_session_start(project="<dir-name>").
 
 Environment variables:
 
-  GUILD_NO_UPDATE_CHECK=1   disable the upgrade-available nudge on stderr`,
+  GUILD_NO_UPDATE_CHECK=1   disable the upgrade-available nudge on stderr
+  GUILD_AGENT=1             force agent mode (one JSON envelope per verb
+                            on stdout); =0 forces it off. Auto-detected
+                            for known agent harness shells; see --agent`,
 	SilenceUsage: true,
 }
 
@@ -148,6 +151,17 @@ func init() {
 	// meaning of -v is "verbose", not "version" (QUEST-10). Subcommands
 	// read cmd.Flags().GetBool("verbose") to expand their output.
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "enable verbose output")
+
+	// --agent is a persistent global flag: registry-generated verbs emit
+	// one machine-readable JSON envelope per invocation instead of the
+	// human rendering. Auto-detected from known agent-harness env markers
+	// (or GUILD_AGENT=1); an explicit --agent=false forces human output.
+	// The runtime check lives in internal/command (agentModeActive) next
+	// to the envelope writer. Note: quest journal/orders/campfire/summon
+	// keep their historical local string --agent (agent identity), which
+	// shadows this flag; agent mode reaches them via the env path.
+	rootCmd.PersistentFlags().Bool("agent", false,
+		"machine-readable JSON output for coding agents (auto-detected; --agent=false forces human output)")
 
 	// --version retains its long spelling. Its short flag is -V so that
 	// -v stays reserved for --verbose (see above). `guild version` (the

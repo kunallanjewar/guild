@@ -61,8 +61,13 @@ func (c *Command[I, O]) registerCobraFlags(cmd *cobra.Command) {
 		}
 		flagName := cobraFlagNameFor(a)
 		// Skip if an ancestor already exposes this flag as persistent —
-		// cobra merges inherited flags into cmd.Flags() at runtime.
-		if cmd.InheritedFlags().Lookup(flagName) != nil {
+		// cobra merges inherited flags into cmd.Flags() at runtime. Only
+		// same-typed inherited flags satisfy the spec, though: when the
+		// types differ (e.g. the root's persistent bool --agent vs quest
+		// journal's local string --agent identity flag), register the
+		// local flag anyway. pflag's merge ignores duplicates, so the
+		// local flag shadows the inherited one for this verb.
+		if inh := cmd.InheritedFlags().Lookup(flagName); inh != nil && inh.Value.Type() == cobraFlagValueType(a) {
 			continue
 		}
 		registerCobraFlag(cmd, flagName, a)
@@ -78,13 +83,28 @@ func (c *Command[I, O]) cobraRunE(d Deps) func(*cobra.Command, []string) error {
 		if ctx == nil {
 			ctx = cc.Root().Context()
 		}
+		// Agent mode: every outcome of this invocation (input error,
+		// handler error, success) becomes exactly one JSON envelope on
+		// stdout. Resolved once up front so input-build failures are
+		// structured too. Takes precedence over --json (the envelope
+		// wraps the same typed output --json would emit bare).
+		agentOut := agentModeActive(cc)
 		in, err := buildInputFromCobra[I](c.Args, args, cc)
 		if err != nil {
+			if agentOut {
+				return c.emitAgentError(cc, err)
+			}
 			return err
 		}
 		out, herr := c.Handler(ctx, d, in)
 		if herr != nil {
+			if agentOut {
+				return c.emitAgentError(cc, herr)
+			}
 			return handleCobraError(cc, c, herr)
+		}
+		if agentOut {
+			return c.emitAgentSuccess(cc, out)
 		}
 		sink := CLISink{NoEmoji: cobraNoEmoji(cc)}
 		jsonOut, _ := cc.Flags().GetBool("json")
@@ -173,6 +193,27 @@ func cobraFlagNameFor(a ArgSpec) string {
 		return a.CLIFlagName
 	}
 	return cobraFlagName(a.Name)
+}
+
+// cobraFlagValueType returns the pflag Value.Type() string that
+// registerCobraFlag would produce for a. Used to decide whether an
+// inherited persistent flag actually satisfies the spec (same name AND
+// same type) or must be shadowed by a local registration.
+func cobraFlagValueType(a ArgSpec) string {
+	switch a.Type {
+	case ArgString:
+		return "string"
+	case ArgBool:
+		return "bool"
+	case ArgStringSlice:
+		if a.Repeatable {
+			return "stringArray"
+		}
+		return "stringSlice"
+	case ArgInt:
+		return "int"
+	}
+	return ""
 }
 
 func registerCobraFlag(cmd *cobra.Command, flagName string, a ArgSpec) {

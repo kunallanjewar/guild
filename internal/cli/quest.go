@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -235,7 +236,7 @@ func buildCLICommandDeps() command.Deps {
 			defer func() { _ = db.Close() }()
 			p, err := project.Resolve(ctx, db, strings.TrimSpace(argProject))
 			if err != nil {
-				return "", err
+				return "", wrapResolveHint(err)
 			}
 			return p.ID, nil
 		},
@@ -312,6 +313,22 @@ func wireQuestEmbedDeps() *quest.QuestEmbedDeps {
 }
 
 // --- shared helpers ---
+
+// wrapResolveHint attaches an agent-facing recovery hint to project
+// resolution failures. Human-mode output is byte identical (WithHint
+// preserves Error()); the hint only surfaces in the agent-mode JSON
+// envelope. ErrNotInGitRepo is included for completeness even though
+// project.Resolve currently rewraps it without %w.
+func wrapResolveHint(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, project.ErrNotRegistered) || errors.Is(err, project.ErrNotInGitRepo) {
+		return command.WithHint(err,
+			"run 'guild init' from the project root, or pass --project <name> for a registered project")
+	}
+	return err
+}
 
 func loadCfg(cmd *cobra.Command) (*config.Config, error) {
 	return config.Load(cmd.Flags())

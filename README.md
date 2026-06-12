@@ -261,6 +261,60 @@ State lives in SQLite under `~/.guild/`. Switching MCP clients requires no expor
 
 ---
 
+## 🤖 Agent mode: structured CLI output
+
+MCP is guild's primary agent surface, but some agents prefer shelling
+out to a CLI: it avoids tool-schema token overhead and works in any
+harness that can run a command. Agent mode upgrades that path from
+screen-scraping to a stable contract: exactly one JSON envelope per
+invocation on stdout.
+
+```console
+$ guild quest post "wire the cache layer" --agent
+{"ok":true,"command":"quest_post","output":{"quest":{"id":"QUEST-7","subject":"wire the cache layer","priority":"P2","status":"next","updated_at":"..."}}}
+
+$ guild quest accept QUEST-99 --agent
+{"ok":false,"command":"quest_accept","error":"quest not found: QUEST-99"}
+```
+
+The envelope schema is minimal and append-only:
+
+| field     | type   | when                                                                  |
+| --------- | ------ | --------------------------------------------------------------------- |
+| `ok`      | bool   | always                                                                |
+| `command` | string | always; the verb's wire name, identical to the matching MCP tool name |
+| `output`  | object | on success; the verb's typed result, the same shape `--json` emits    |
+| `error`   | string | on failure                                                            |
+| `hint`    | string | optional; recovery guidance on errors, non-fatal warnings on success  |
+
+Exit codes are unchanged: zero on success, non-zero on failure, with
+the failure already serialized on stdout. Without agent mode, output is
+byte-identical to what it was before; the human rendering is untouched.
+
+**Turning it on.** Three mechanisms, in priority order:
+
+1. `--agent` on any verb. Explicit and per-invocation; `--agent=false`
+   forces human output even when the environment says otherwise.
+2. `GUILD_AGENT=1` in the environment (`GUILD_AGENT=0` forces it off).
+3. Auto-detection. Harnesses that export an environment marker into the
+   shells they spawn are recognized without any flag. Currently
+   detected: `CLAUDECODE` (Claude Code), `CODEX_SANDBOX` and
+   `CODEX_SANDBOX_NETWORK_DISABLED` (Codex CLI), `CURSOR_AGENT`
+   (Cursor agent CLI). Any agent whose harness exports no marker gets
+   identical behavior from `GUILD_AGENT=1`; no harness is privileged.
+
+**Scope.** Agent mode covers the registry-generated verbs: the `lore`
+and `quest` verbs that mirror MCP tools 1:1. Four verbs predate agent
+mode with a string `--agent <id>` flag carrying agent identity
+(`quest journal`, `quest orders`, `quest campfire`, `quest summon`);
+they keep that meaning, so reach them through the environment toggle
+instead. Hand-written helpers (`guild init`, `guild status`,
+`lore appraise`) keep human output for now. When both are set,
+`--agent` takes precedence over `--json`: the envelope already wraps
+the same typed output.
+
+---
+
 ## 🤝 Contributing
 
 See [AGENTS.md](./AGENTS.md) for the agent-facing contributor contract
