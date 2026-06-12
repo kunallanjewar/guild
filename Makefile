@@ -334,6 +334,49 @@ release-dry-run: ## Full release dry-run (skip publish; validates signing + Home
 	goreleaser release --snapshot --clean --skip=publish,sign
 
 # ----------------------------------------------------------------------
+# Docker
+# ----------------------------------------------------------------------
+
+##@ Docker
+
+DOCKER       ?= docker
+DOCKER_IMAGE ?= guild
+DOCKER_TAG   ?= latest
+
+.PHONY: docker-build
+docker-build: ## Build the guild Docker image (pure-Go, -tags=withembed, non-root runtime)
+	$(DOCKER) build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg DATE=$(DATE) \
+		-t $(DOCKER_IMAGE):$(DOCKER_TAG) .
+	@echo "✓ built image $(DOCKER_IMAGE):$(DOCKER_TAG)"
+
+.PHONY: docker-test
+docker-test: docker-build ## Build then smoke-test the image: --version, init, inscribe/appraise round-trip against a volume-backed home
+	@vol="guild-docker-test-$$$$"; \
+	$(DOCKER) volume create "$$vol" >/dev/null; \
+	trap '$(DOCKER) volume rm "$$vol" >/dev/null' EXIT; \
+	echo "--- guild --version (state volume mounted)"; \
+	$(DOCKER) run --rm -v "$$vol:/home/guild/.guild" $(DOCKER_IMAGE):$(DOCKER_TAG) --version; \
+	echo "--- guild init + lore inscribe/appraise round-trip"; \
+	$(DOCKER) run --rm -v "$$vol:/home/guild/.guild" --entrypoint /bin/sh $(DOCKER_IMAGE):$(DOCKER_TAG) -c ' \
+		set -eu; \
+		mkdir -p "$$HOME/smoke" && cd "$$HOME/smoke"; \
+		guild init --yes; \
+		guild lore inscribe "docker smoke entry" \
+			--kind observation \
+			--summary "Inscribed by make docker-test to prove the in-container write path." \
+			--topic docker-smoke \
+			--project smoke; \
+		guild lore appraise "docker smoke entry" | grep "docker smoke entry"; \
+	'; \
+	echo "--- state persists across containers (fresh container, same volume)"; \
+	$(DOCKER) run --rm -v "$$vol:/home/guild/.guild" $(DOCKER_IMAGE):$(DOCKER_TAG) \
+		lore appraise "docker smoke entry" | grep "docker smoke entry"; \
+	echo "✓ docker-test passed ($(DOCKER_IMAGE):$(DOCKER_TAG))"
+
+# ----------------------------------------------------------------------
 # CI (mirrors .github/workflows/*.yml)
 # ----------------------------------------------------------------------
 
