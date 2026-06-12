@@ -12,6 +12,12 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild hints list`](#guild-hints-list) — list all registered hint rules with severity and enabled state
 - [`guild hints prune`](#guild-hints-prune) — run the auto-prune pass (demote/disable rules below 14.46% hit rate)
 - [`guild hints stats`](#guild-hints-stats) — per-rule fire count, scored count, hit rate, and prune-floor comparison
+- [`guild hooks`](#guild-hooks) — manage harness lifecycle hooks (auto-inject guild context)
+- [`guild hooks diff`](#guild-hooks-diff) — show what 'guild hooks sync' would change (no writes)
+- [`guild hooks install`](#guild-hooks-install) — install guild lifecycle hooks into detected harnesses
+- [`guild hooks list`](#guild-hooks-list) — show all managed hook targets with sync status
+- [`guild hooks scan`](#guild-hooks-scan) — report the hooks currently present in each harness's settings
+- [`guild hooks sync`](#guild-hooks-sync) — regenerate per-harness hook settings from the base config
 - [`guild init`](#guild-init) — scaffold AGENTS.md and register this repo with guild
 - [`guild lore`](#guild-lore) — knowledge lifecycle (read/write/decay/supersede)
 - [`guild lore appraise`](#guild-lore-appraise) — hybrid search (BM25 + recency + title-boost)
@@ -135,6 +141,169 @@ per-rule fire count, scored count, hit rate, and prune-floor comparison
 ```
 guild hints stats
 ```
+
+## `guild hooks`
+
+manage harness lifecycle hooks (auto-inject guild context)
+
+**Usage**
+
+```
+guild hooks
+```
+
+guild hooks: install and maintain harness lifecycle hooks
+
+Lifecycle hooks make guild proactive: the harness runs guild commands
+at session start (prime the brief), before compaction (capture a brief)
+and on each prompt (inject relevant lore) without the agent having to
+remember a tool call.
+
+The shared source of truth is ~/.guild/hooks-base.json (created on
+first install; edit it to override the defaults, then run
+'guild hooks sync'). Per-harness settings files are derived from it by
+adapters and never hand-edited by guild beyond the guild-owned hook
+groups: a hook group is guild-owned only when every command in it
+starts with 'guild'. Everything else in your settings files is
+preserved untouched.
+
+Status vocabulary used by list/diff:
+  in-sync   guild-owned hooks match the base config
+  drift     guild-owned hooks present but differ from the base config
+  missing   no guild-owned hooks (or no settings file) for the harness
+
+## `guild hooks diff`
+
+show what 'guild hooks sync' would change (no writes)
+
+**Usage**
+
+```
+guild hooks diff [flags]
+```
+
+guild hooks diff: preview sync
+
+Compares the guild-owned hooks in each detected harness's settings file
+against the base config and prints the difference: '-' lines are
+guild-owned hooks sync would remove or rewrite, '+' lines are hooks it
+would add. Foreign hooks never appear; sync does not touch them.
+Nothing is written.
+
+Flags:
+  --no-color  plain output without ANSI colors
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--no-color` | bool | `false` | plain output without ANSI colors |
+
+## `guild hooks install`
+
+install guild lifecycle hooks into detected harnesses
+
+**Usage**
+
+```
+guild hooks install [flags]
+```
+
+guild hooks install: first-time hook setup
+
+Detects which harnesses are present on this machine, writes the shared
+base config to ~/.guild/hooks-base.json when missing, and renders it
+into each detected harness's settings file through that harness's
+adapter. Foreign hooks and unrelated settings are preserved untouched;
+re-running on an already-installed harness is a no-op.
+
+Flags:
+  --harness=NAME  only install for one adapter (see 'guild hooks list')
+  --dry-run       report what would be written; write nothing
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--dry-run` | bool | `false` | report what would be written; write nothing |
+| `--harness` | string | `—` | only install for the named harness adapter |
+
+## `guild hooks list`
+
+show all managed hook targets with sync status
+
+**Usage**
+
+```
+guild hooks list [flags]
+```
+
+guild hooks list: managed targets and their state
+
+One row per registered adapter: whether the harness is detected on
+this machine, the settings file the adapter manages, and the sync
+status (in-sync / drift / missing).
+
+Flags:
+  --json  machine-readable output
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--json` | bool | `false` | machine-readable output |
+
+## `guild hooks scan`
+
+report the hooks currently present in each harness's settings
+
+**Usage**
+
+```
+guild hooks scan [flags]
+```
+
+guild hooks scan: read-only inventory
+
+Reads each registered adapter's settings file and reports every hook
+found there, guild-owned and foreign alike. Foreign hooks are tagged so
+you can see what else manages this harness. Nothing is written.
+
+Flags:
+  --verbose  also report harnesses with no hooks installed
+  --json     machine-readable output
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--json` | bool | `false` | machine-readable output |
+
+## `guild hooks sync`
+
+regenerate per-harness hook settings from the base config
+
+**Usage**
+
+```
+guild hooks sync [flags]
+```
+
+guild hooks sync: propagate ~/.guild/hooks-base.json
+
+Re-renders the base config into every detected harness's settings file.
+Guild-owned hook groups are replaced in place and missing ones
+appended; foreign and mixed groups are preserved untouched. Idempotent:
+a second run with nothing changed writes nothing.
+
+Flags:
+  --dry-run  report what would change; write nothing
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--dry-run` | bool | `false` | report what would change; write nothing |
 
 ## `guild init`
 

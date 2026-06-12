@@ -200,6 +200,10 @@ The MCP host collapses tool results in chat — the user sees `Called guild (ctr
 
 Read operations (appraise/list/study/oath) don't need narration unless the finding meaningfully shapes your next action.
 
+## Harness hooks (proactive context injection)
+
+If guild hooks are not installed for this harness (no guild-owned entries in its hook settings), nudge the user once: run `guild hooks install`. Hooks wire session-start briefing, pre-compact capture, and prompt-time lore injection, so context arrives without manual tool calls. `guild hooks list` shows per-harness sync status; after editing `~/.guild/hooks-base.json`, run `guild hooks sync` to propagate.
+
 ## Session end / compaction
 
 When you sense the session ending, hit a token/context warning, or the user mentions wrapping up or compacting:
