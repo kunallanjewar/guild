@@ -1,0 +1,166 @@
+package daemon
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"path/filepath"
+	"time"
+
+	"github.com/mathomhaus/guild/internal/guildpath"
+)
+
+// socketFileName is the basename of the daemon's unix socket under
+// ~/.guild/.
+const socketFileName = "daemon.sock"
+
+// socketFileMode is the mode bits applied to the unix socket after a
+// successful listen. The parent ~/.guild dir is already 0700, but the
+// socket is an IPC endpoint into the user's whole guild state, so it
+// gets the same belt-and-suspenders treatment as the DB files.
+const socketFileMode = 0o600
+
+// preambleMaxBytes caps the first line read on an accepted connection.
+// A legitimate preamble is a pid, a version string, and one filesystem
+// path, well under a kilobyte. Anything larger is a misdialed client
+// (or garbage) and the connection is dropped before it can balloon the
+// read buffer.
+const preambleMaxBytes = 16 * 1024
+
+// preambleTimeout bounds how long an accepted connection may sit silent
+// before its first line arrives. The discovery probe dials and closes
+// without writing, so silent connections are routine; the deadline
+// keeps them from pinning goroutines.
+const preambleTimeout = 10 * time.Second
+
+// SocketPath returns the daemon's unix socket location
+// (~/.guild/daemon.sock), ensuring ~/.guild exists with 0700 first.
+// The daemon and every dialer resolve the path through this function
+// so the two sides can never disagree on where the socket lives.
+func SocketPath() (string, error) {
+	dir, err := guildpath.EnsureGuildDir()
+	if err != nil {
+		return "", fmt.Errorf("daemon: resolve socket path: %w", err)
+	}
+	return filepath.Join(dir, socketFileName), nil
+}
+
+// ShimPreamble is the identity line a stdio shim sends as the first
+// ndjson line after dialing the daemon socket, wrapped on the wire as
+// {"guild_shim":{...}}. The daemon impersonates this context for the
+// whole session: PID keys the per-session state file (and becomes the
+// presence/lease hook for later phases), CWD drives project
+// auto-inference exactly as the stdio server's own cwd would, and
+// Version lets the daemon log skew that slipped past the shim's probe.
+type ShimPreamble struct {
+	// Version is the shim binary's ldflags-stamped version.
+	Version string `json:"version"`
+	// CWD is the shim process's working directory.
+	CWD string `json:"cwd"`
+	// PID is the shim's process id.
+	PID int `json:"pid"`
+}
+
+// Status is the one-line JSON response to a status-request preamble
+// ({"guild_status_request":{}}). The daemon writes exactly one of these
+// and closes the connection.
+type Status struct {
+	// PID is the daemon's process id.
+	PID int `json:"pid"`
+	// Version is the daemon's ldflags-stamped build version.
+	Version string `json:"version"`
+	// StartedAt is the daemon's startup time, serialized RFC 3339.
+	StartedAt time.Time `json:"started_at"`
+	// ActiveSessions counts the MCP sessions currently being served.
+	// Status connections are not sessions and are never counted.
+	ActiveSessions int `json:"active_sessions"`
+	// EmbedderState mirrors meta.embedder_state from lore.db
+	// ("enabled", "disabled", ...), or "unknown" when it cannot be
+	// read.
+	EmbedderState string `json:"embedder_state"`
+}
+
+// preamble is the wire shape of the first ndjson line on every
+// accepted connection. Exactly one of the two fields must be present:
+//
+//	{"guild_shim":{"version":"v0.3.2","cwd":"/path/to/project","pid":12345}}
+//	{"guild_status_request":{}}
+type preamble struct {
+	Shim          *ShimPreamble `json:"guild_shim"`
+	StatusRequest *struct{}     `json:"guild_status_request"`
+}
+
+// readPreamble consumes the first newline-terminated line from br and
+// parses it into a validated preamble. The bufio.Reader may buffer
+// bytes beyond the line; callers that hand the stream onward must keep
+// reading through br (see sessionConn).
+func readPreamble(br *bufio.Reader) (*preamble, error) {
+	line, err := readPreambleLine(br)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &preamble{}
+	if err := json.Unmarshal(line, p); err != nil {
+		return nil, fmt.Errorf("daemon: parse preamble: %w", err)
+	}
+	switch {
+	case p.Shim != nil && p.StatusRequest != nil:
+		return nil, errors.New("daemon: preamble carries both guild_shim and guild_status_request")
+	case p.Shim == nil && p.StatusRequest == nil:
+		return nil, errors.New("daemon: preamble carries neither guild_shim nor guild_status_request")
+	case p.Shim != nil:
+		if p.Shim.PID <= 0 {
+			return nil, fmt.Errorf("daemon: shim preamble pid %d is not a valid process id", p.Shim.PID)
+		}
+		if p.Shim.CWD == "" {
+			// An empty cwd would silently fall back to the daemon's own
+			// working directory during project inference: exactly the
+			// context bleed the preamble exists to prevent.
+			return nil, errors.New("daemon: shim preamble has empty cwd")
+		}
+	}
+	return p, nil
+}
+
+// readPreambleLine reads one '\n'-terminated line from br, enforcing
+// preambleMaxBytes. ReadSlice is used (not ReadString) so the size cap
+// applies per-fragment instead of letting a hostile peer grow one
+// unbounded allocation.
+func readPreambleLine(br *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		frag, err := br.ReadSlice('\n')
+		line = append(line, frag...)
+		if len(line) > preambleMaxBytes {
+			return nil, fmt.Errorf("daemon: preamble exceeds %d bytes", preambleMaxBytes)
+		}
+		if err == nil {
+			return line, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return nil, fmt.Errorf("daemon: read preamble: %w", err)
+	}
+}
+
+// sessionConn splices the preamble reader's buffered remainder back
+// onto the connection: reads drain through the bufio.Reader (which may
+// hold JSON-RPC bytes that arrived in the same packet as the
+// preamble), writes and closes go straight to the underlying conn.
+type sessionConn struct {
+	r    *bufio.Reader
+	conn net.Conn
+}
+
+// Compile-time check: sessionConn is the io.ReadWriteCloser handed to
+// SessionHandler implementations.
+var _ io.ReadWriteCloser = (*sessionConn)(nil)
+
+func (c *sessionConn) Read(p []byte) (int, error)  { return c.r.Read(p) }
+func (c *sessionConn) Write(p []byte) (int, error) { return c.conn.Write(p) }
+func (c *sessionConn) Close() error                { return c.conn.Close() }

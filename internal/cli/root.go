@@ -105,6 +105,40 @@ func SetMCPServeRunE(run func(*cobra.Command, []string) error) {
 	mcpServeCmd.RunE = run
 }
 
+var daemonCmd = &cobra.Command{
+	Use:   "daemon",
+	Short: "guild daemon subcommands",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return cmd.Help()
+	},
+}
+
+var daemonRunCmd = &cobra.Command{
+	Use:   "run",
+	Short: "run the guild daemon in the foreground (MCP sessions over a unix socket)",
+	Long: `Runs the guild daemon in the foreground until interrupted.
+
+The daemon listens on a unix socket under ~/.guild/ and serves the same
+MCP tool surface as 'guild mcp serve', one session per connection. All
+sessions share a single embedder and a single process writing to the
+guild databases. A discovery file (~/.guild/daemon.json) is written on
+start and removed on exit; SIGINT/SIGTERM stop the daemon cleanly.
+
+Optional: agents work identically without the daemon. It only changes
+how sessions are served, never what they can do.`,
+	RunE: func(_ *cobra.Command, _ []string) error {
+		return errNotImplemented
+	},
+}
+
+// SetDaemonRunRunE installs the real `guild daemon run` handler. Same
+// seam pattern as SetMCPServeRunE: cmd/guild owns the internal/daemon +
+// internal/mcp imports and attaches the RunE at init, so internal/cli
+// never depends on the MCP SDK or the daemon listener.
+func SetDaemonRunRunE(run func(*cobra.Command, []string) error) {
+	daemonRunCmd.RunE = run
+}
+
 // upgradeNudgeFn is the optional hook called by the PersistentPreRun on
 // every CLI invocation. cmd/guild/main.go injects the real implementation
 // via SetUpgradeNudge. When nil, no nudge is emitted (the default in tests
@@ -177,7 +211,8 @@ func init() {
 	}
 
 	mcpCmd.AddCommand(mcpServeCmd)
-	rootCmd.AddCommand(loreCmd, questCmd, mcpCmd, versionCmd)
+	daemonCmd.AddCommand(daemonRunCmd)
+	rootCmd.AddCommand(loreCmd, questCmd, mcpCmd, daemonCmd, versionCmd)
 }
 
 // Execute runs the root command.

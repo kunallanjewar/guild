@@ -112,13 +112,16 @@ func (c *serverCore) handleSessionStart(
 	name := strings.TrimSpace(in.Project)
 	var viaWorktreeFallback bool
 	if name == "" {
-		// Auto-infer from the MCP server's cwd via git-toplevel lookup.
-		// An explicit project arg would have taken the fast path above;
-		// we only reach here when the agent called guild_session_start()
-		// with no args. The inference pipeline is the same one the CLI
-		// uses (project.Resolve), reused so MCP and CLI can't diverge
-		// on which cwd resolves to which project.
-		inferred, fallback, err := inferProjectFromCWD(ctx)
+		// Auto-infer from the session's cwd via git-toplevel lookup:
+		// the MCP server's own cwd on the stdio path, the shim's
+		// preamble cwd on the daemon path (core.inferProject routes
+		// the distinction). An explicit project arg would have taken
+		// the fast path above; we only reach here when the agent
+		// called guild_session_start() with no args. The inference
+		// pipeline is the same one the CLI uses (project.Resolve),
+		// reused so MCP and CLI can't diverge on which cwd resolves
+		// to which project.
+		inferred, fallback, err := c.inferProject(ctx)
 		if err != nil {
 			// Recoverable: the agent can fix by passing project=... or
 			// by registering the project with guild init. Surface the
@@ -392,13 +395,28 @@ func formatBounties(res *quest.BountiesResult, briefOnly bool) string {
 // The resolver is indirected through mcpProjectResolver so tests can
 // swap in fake Getwd / GitToplevel / GitCommonDir seams.
 func inferProjectFromCWD(ctx context.Context) (projectID string, viaFallback bool, err error) {
+	return inferProjectFromDir(ctx, "")
+}
+
+// inferProjectFromDir is inferProjectFromCWD generalized over the
+// directory the inference anchors on. dir == "" preserves the
+// resolver's own Getwd (the stdio server resolves against its host
+// process's cwd); a non-empty dir substitutes for Getwd entirely (the
+// daemon resolves each connection against the shim's preamble cwd, so
+// two sessions from different project checkouts never bleed into each
+// other through the daemon's ambient working directory).
+func inferProjectFromDir(ctx context.Context, dir string) (projectID string, viaFallback bool, err error) {
 	db, err := openQuestDB(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("open quest db: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	res, err := mcpProjectResolver.ResolveFull(ctx, db, "")
+	resolver := mcpProjectResolver
+	if dir != "" {
+		resolver.Getwd = func() (string, error) { return dir, nil }
+	}
+	res, err := resolver.ResolveFull(ctx, db, "")
 	if err != nil {
 		return "", false, err
 	}

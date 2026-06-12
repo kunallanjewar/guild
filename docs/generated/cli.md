@@ -6,6 +6,8 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 
 ## Verbs
 
+- [`guild daemon`](#guild-daemon) — guild daemon subcommands
+- [`guild daemon run`](#guild-daemon-run) — run the guild daemon in the foreground (MCP sessions over a unix socket)
 - [`guild hints`](#guild-hints) — hint engine inspection + administration
 - [`guild hints disable`](#guild-hints-disable) — disable a rule
 - [`guild hints enable`](#guild-hints-enable) — re-enable a previously disabled rule
@@ -73,6 +75,37 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild telemetry`](#guild-telemetry) — telemetry analytics (usage log, token estimates)
 - [`guild telemetry tokens`](#guild-telemetry-tokens) — estimate token cost from usage.log response bytes
 - [`guild version`](#guild-version) — print guild version information
+
+## `guild daemon`
+
+guild daemon subcommands
+
+**Usage**
+
+```
+guild daemon
+```
+
+## `guild daemon run`
+
+run the guild daemon in the foreground (MCP sessions over a unix socket)
+
+**Usage**
+
+```
+guild daemon run
+```
+
+Runs the guild daemon in the foreground until interrupted.
+
+The daemon listens on a unix socket under ~/.guild/ and serves the same
+MCP tool surface as 'guild mcp serve', one session per connection. All
+sessions share a single embedder and a single process writing to the
+guild databases. A discovery file (~/.guild/daemon.json) is written on
+start and removed on exit; SIGINT/SIGTERM stop the daemon cleanly.
+
+Optional: agents work identically without the daemon. It only changes
+how sessions are served, never what they can do.
 
 ## `guild hints`
 
