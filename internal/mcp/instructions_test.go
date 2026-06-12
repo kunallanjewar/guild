@@ -29,7 +29,7 @@ import (
 // loop, worked demonstrations). Hosts that truncate
 // initialize.instructions deliver only that prefix;
 // TestInstructionsFirst2KB gates its composition.
-const wantStaticSHA = "a7a11dea383cb018adea3ea0ded8b92200aa1e9c39d30f9f2eaa4ff6f8c3046a"
+const wantStaticSHA = "8248295e193d5defa541e5c91e029bd54e2eccc93e04077981cb43d88f08a543"
 
 func TestStaticInstructions_Embedded(t *testing.T) {
 	if staticInstructions == "" {

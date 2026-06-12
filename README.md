@@ -153,6 +153,14 @@ In your editor, tell the agent: _"start a guild session for myapp."_
 
 The agent takes it from there, including all subsequent sessions.
 
+### Optional: lifecycle hooks
+
+```bash
+guild hooks install
+```
+
+Wires guild into your harness's lifecycle hooks so context arrives proactively: a brief primes each session start, a capture fires before compaction, and relevant lore is injected as you prompt. The shared config lives at `~/.guild/hooks-base.json`; edit it and run `guild hooks sync` to propagate. `guild hooks list` shows per-harness sync status, `guild hooks diff` previews what sync would change, and `guild hooks scan` inventories the hooks already in your settings (including ones guild does not manage). Guild only ever rewrites hook groups whose every command starts with `guild`; everything else in your settings files is preserved untouched. Adapters ship per harness; `guild hooks list` shows which ones your build supports.
+
 See a few [`examples/`](./examples/) of what guild can do. All small scenarios, each under 5 minutes.
 
 ## ⚔️ A full session
