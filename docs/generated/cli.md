@@ -194,8 +194,11 @@ guild lore appraise QUERY [flags]
 | --- | --- | --- | --- |
 | `--all` | bool | `false` | include archived/superseded entries |
 | `--all-projects` | bool | `true` | search across every project (default) |
+| `--from-stdin-json` | bool | `false` | read the harness hook JSON envelope from stdin and use its .prompt as the query (hook mode) |
+| `--inject` | bool | `false` | hook mode: print a bounded top-3 pointer-cite payload for context injection |
 | `--limit` | int | `10` | max results |
 | `--project`, `-p` | string | `—` | project id (defaults to git toplevel) |
+| `--query` | string | `—` | query text (hook mode alternative to the positional QUERY) |
 | `--since` | string | `—` | only entries created within: Nd\|Nw\|Nm |
 | `--w-fts` | float64 | `0` | override scoring weight for BM25 (0..1) |
 | `--w-recency` | float64 | `0` | override scoring weight for recency (0..1) |
@@ -862,6 +865,8 @@ Session-end briefing for the next agent. Surfaced by next session's guild_sessio
 
 | flag | type | default | description |
 | --- | --- | --- | --- |
+| `--auto` | bool | `false` | hook mode: print the bounded session-priming payload (oath + last brief + top bounties) to stdout |
+| `--capture` | bool | `false` | with --auto: store the rendered payload as the session brief and print a one-line confirmation |
 | `--json` | bool | `false` | emit structured JSON result instead of formatted text |
 
 ## `guild quest campaign`
