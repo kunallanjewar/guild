@@ -39,7 +39,10 @@ docker-free.
   the same container state, then a verification session that requires
   every entry back (the regression net for lost concurrent writes).
   Only the deterministic verification phase is golden-recorded; entry
-  id assignment depends on interleaving and is scrubbed.
+  id assignment depends on interleaving and is scrubbed. Direct-mode
+  only: its repair path is the next process's once-per-process
+  auto-backfill, which has no equivalent under a shared long-lived
+  daemon (see `GUILD_E2E_MODE` below), so it self-skips in daemon mode.
 
 ## Golden transcripts
 
@@ -56,16 +59,28 @@ transcripts against the same goldens.
 When an intentional output change breaks a golden, run `make e2e-update`
 and review the transcript diff like any other code change.
 
-## GUILD_E2E_MODE (forward hook)
+## GUILD_E2E_MODE (process model)
 
-`GUILD_E2E_MODE=daemon` is accepted today and is a documented no-op: it
-runs the identical direct-mode scenarios (one `guild mcp serve` process
-per session). When the daemon ships, the harness will start it inside
-the container before opening sessions, and the shared goldens turn the
-"daemon-up equals daemon-down" invariant into a mechanical diff.
+`GUILD_E2E_MODE` selects how sessions reach the guild server:
 
-`GUILD_E2E_MODE=direct` (or unset) is the default; anything else fails
-fast.
+- `direct` (or unset, the default): one `guild mcp serve` process per
+  session, served in-process. This is the no-daemon baseline.
+- `daemon`: the harness starts an in-container daemon (`guild daemon
+  start`) after `guild init` and waits for it to publish a dialable
+  socket; every session afterward routes through the shim pipe to that
+  daemon. The scrubbed transcripts are compared against the SAME
+  goldens, so a passing daemon-mode run mechanically proves the
+  "daemon-up equals daemon-down" invariant: the daemon is observably
+  invisible. The `baseline` scenario runs in both modes; `concurrency`
+  is direct-mode only (see Scenarios).
+
+Anything other than `direct` or `daemon` fails fast.
+
+A finer-grained version of this same parity assertion runs without
+Docker (and therefore in CI's standard test job) in
+`tests/integration/daemon_parity_test.go`: it runs the canonical MCP and
+CLI scenarios daemon-down and daemon-up in two fresh isolated homes and
+diffs the scrubbed output byte-for-byte.
 
 ## A note on embedding writes
 

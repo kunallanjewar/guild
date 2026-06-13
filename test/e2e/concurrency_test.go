@@ -49,6 +49,21 @@ var concurrentTitles = [2][5]string{
 // even though the write order is not.
 func TestE2EConcurrency(t *testing.T) {
 	requireE2E(t)
+	// Direct-mode only. This scenario's verification phase repairs the
+	// detached vector writes the concurrent writers leave pending by
+	// relying on the MCP server's once-per-process auto-backfill: a fresh
+	// verification session, fresh process, fresh backfill gate, repairs
+	// every pending row (see waitForFullEmbedCoverage). Under a shared
+	// long-lived daemon there is no fresh process: the backfill gate
+	// fires once at daemon startup against the empty corpus and is then
+	// spent, so the repair path this scenario depends on does not apply.
+	// Daemon-side backfill cadence is a separate concern (the daemon's
+	// sleep cycle), not this lost-write regression net. Parity for the
+	// full canonical loop is proven byte-identical by TestE2EBaseline,
+	// which runs in both modes.
+	if suite.mode == modeDaemon {
+		t.Skip("concurrency lost-write net is direct-mode only; its per-process backfill repair has no daemon equivalent (baseline proves daemon parity)")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 

@@ -41,10 +41,10 @@ const (
 	// envUpdate switches golden comparison to golden regeneration.
 	envUpdate = "GUILD_E2E_UPDATE"
 	// envMode selects the execution mode. "direct" (or empty) drives
-	// `guild mcp serve` per session, the only mode that exists today.
-	// "daemon" is an intentional forward hook: it is accepted and runs
-	// the exact same scenarios, so the future daemon can be dropped in
-	// and asserted byte-identical against the same golden transcripts.
+	// `guild mcp serve` per session in-process, the no-daemon baseline.
+	// "daemon" starts an in-container daemon after init and routes every
+	// session through the shim pipe, asserting byte-identical output
+	// against the same golden transcripts (the ADR-005 Phase 1 invariant).
 	envMode = "GUILD_E2E_MODE"
 
 	defaultImage = "guild:latest"
@@ -61,13 +61,12 @@ var suite struct {
 	mode    string
 }
 
-// modeNote is the documented no-op contract for GUILD_E2E_MODE=daemon.
-// Until the guild daemon ships, daemon mode runs the identical direct-mode
-// scenarios. Once the daemon lands, the harness will start it inside the
-// container before opening sessions; the golden transcripts are shared
-// between modes on purpose so daemon-up vs daemon-down can be asserted
-// byte-identical (the ADR-005 Phase 1 invariant).
-const modeNote = "GUILD_E2E_MODE=daemon: daemon not shipped yet; running identical direct-mode scenarios (documented no-op hook)"
+// modeNote announces daemon-mode runs on stderr so a CI log makes the
+// active process model unmistakable. The daemon is started per scenario
+// after init (see container.startDaemon); sessions then route through the
+// shim pipe. Golden transcripts are shared between modes on purpose, so
+// daemon-up vs daemon-down is asserted byte-identical (ADR-005 Phase 1).
+const modeNote = "GUILD_E2E_MODE=daemon: starting an in-container daemon per scenario; sessions route through the shim and must match the shared goldens"
 
 // requireE2E skips t unless the suite is enabled. Every scenario test
 // calls this first so a plain `go test ./...` never touches docker.

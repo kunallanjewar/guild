@@ -115,6 +115,10 @@ test-short: ## Run tests with -short (skips slow fixtures)
 
 .PHONY: test-integration
 test-integration: build sqlcheck ## Run end-to-end integration tests (builds guild + sqlcheck first)
+	# Includes the daemon parity suite (daemon_parity_test.go): each parity
+	# test runs the canonical MCP / CLI scenario twice (daemon-down and
+	# daemon-up) in fresh isolated homes and diffs the scrubbed output, so
+	# both arms run from this one target.
 	$(GO) test -race -count=1 ./tests/integration/...
 
 .PHONY: cover
