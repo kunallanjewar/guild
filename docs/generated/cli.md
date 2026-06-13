@@ -7,7 +7,11 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 ## Verbs
 
 - [`guild daemon`](#guild-daemon) — guild daemon subcommands
+- [`guild daemon restart`](#guild-daemon-restart) — restart the guild daemon (stop, then start)
 - [`guild daemon run`](#guild-daemon-run) — run the guild daemon in the foreground (MCP sessions over a unix socket)
+- [`guild daemon start`](#guild-daemon-start) — start the guild daemon in the background
+- [`guild daemon status`](#guild-daemon-status) — show whether the guild daemon is running
+- [`guild daemon stop`](#guild-daemon-stop) — stop the running guild daemon
 - [`guild hints`](#guild-hints) — hint engine inspection + administration
 - [`guild hints disable`](#guild-hints-disable) — disable a rule
 - [`guild hints enable`](#guild-hints-enable) — re-enable a previously disabled rule
@@ -86,6 +90,23 @@ guild daemon subcommands
 guild daemon
 ```
 
+## `guild daemon restart`
+
+restart the guild daemon (stop, then start)
+
+**Usage**
+
+```
+guild daemon restart
+```
+
+Restarts the guild daemon: stop (if one is running) followed by start.
+
+The main use is picking up a new binary after an upgrade: a long-lived
+daemon keeps serving the code it started with, and 'guild daemon
+status' nudges when its version drifts from this binary's. Exits 0
+with the new daemon's pid on success.
+
 ## `guild daemon run`
 
 run the guild daemon in the foreground (MCP sessions over a unix socket)
@@ -106,6 +127,78 @@ start and removed on exit; SIGINT/SIGTERM stop the daemon cleanly.
 
 Optional: agents work identically without the daemon. It only changes
 how sessions are served, never what they can do.
+
+## `guild daemon start`
+
+start the guild daemon in the background
+
+**Usage**
+
+```
+guild daemon start
+```
+
+Starts the guild daemon as a detached background process.
+
+The daemon is re-executed from this binary as 'guild daemon run' in
+its own session: it survives this command (and the shell) exiting,
+reads from the null device, and writes its log to ~/.guild/daemon.log.
+The log rotates on every start; the previous generation is kept at
+~/.guild/daemon.log.old.
+
+The command waits a few seconds for the daemon to become ready
+(discovery file written, socket accepting), then prints the daemon's
+pid and socket path. Idempotent: when a daemon is already running it
+reports that daemon's pid and exits 0, with a one-line version-drift
+nudge if the running daemon was built from a different version.
+
+## `guild daemon status`
+
+show whether the guild daemon is running
+
+**Usage**
+
+```
+guild daemon status [flags]
+```
+
+Reports the running daemon's pid, version, uptime, active session
+count, and embedder state on one line, with a second nudge line when
+the daemon's version differs from this binary's. --json emits a single
+machine-readable JSON object instead.
+
+Exit status:
+
+  0  a daemon is running
+  1  the status probe failed with an unexpected error
+  3  no daemon is running
+
+**Flags**
+
+| flag | type | default | description |
+| --- | --- | --- | --- |
+| `--json` | bool | `false` | emit one machine-readable JSON object instead of the human line |
+
+## `guild daemon stop`
+
+stop the running guild daemon
+
+**Usage**
+
+```
+guild daemon stop
+```
+
+Stops the running guild daemon.
+
+Reads the daemon's pid from ~/.guild/daemon.json, sends SIGTERM, and
+waits for the process to exit. A daemon still alive after the grace
+period is killed with SIGKILL. The daemon's socket and discovery file
+are gone on success (removed on its behalf when the daemon could not
+run its own cleanup).
+
+Idempotent: exits 0 both when a daemon was stopped and when none was
+running.
 
 ## `guild hints`
 
