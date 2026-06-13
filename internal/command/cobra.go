@@ -2,6 +2,7 @@ package command
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -96,7 +97,13 @@ func (c *Command[I, O]) cobraRunE(d Deps) func(*cobra.Command, []string) error {
 			}
 			return err
 		}
-		out, herr := c.Handler(ctx, d, in)
+		// dispatchHandler prefers the daemon when Deps carries an
+		// ExecRemote transport (see jsonexec.go) and otherwise runs the
+		// local Handler, including on every transport failure, so the
+		// daemon is never a correctness dependency. Rendering below
+		// always happens HERE, on the round-tripped O, keeping output
+		// bytes identical either way.
+		out, herr := c.dispatchHandler(ctx, d, in, cobraNoEmoji(cc))
 		if herr != nil {
 			if agentOut {
 				return c.emitAgentError(cc, herr)
@@ -355,6 +362,17 @@ func cobraNoEmoji(cmd *cobra.Command) bool {
 // handleCobraError applies CLIErrorFormat for bespoke error narration
 // before falling back to cobra's default "Error: %v" rendering.
 func handleCobraError[I, O any](cc *cobra.Command, c *Command[I, O], err error) error {
+	// Daemon-routed handler failures arrive with the narration already
+	// rendered (CLIErrorFormat needs the typed error, which does not
+	// survive JSON, so it ran daemon-side with the client's sink
+	// settings). Print it exactly where the local path would.
+	var remote *RemoteHandlerError
+	if errors.As(err, &remote) {
+		if remote.NarrationOK {
+			_, _ = fmt.Fprintln(cc.ErrOrStderr(), strings.TrimRight(remote.Narration, "\n"))
+		}
+		return err
+	}
 	if c.CLIErrorFormat != nil {
 		sink := CLISink{NoEmoji: cobraNoEmoji(cc)}
 		if msg, ok := c.CLIErrorFormat(sink, err); ok {

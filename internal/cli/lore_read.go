@@ -559,16 +559,19 @@ func init() {
 func bindLoreRegistryVerb[I, O any](parent *cobra.Command, spec *command.Command[I, O], deps command.Deps, telemetryLabel string) {
 	spec.BindCobra(parent, deps)
 	wrapTelemetry(parent, spec.CLIPath[len(spec.CLIPath)-1], telemetryLabel)
+	cliRegistryBoundVerbs = append(cliRegistryBoundVerbs, spec.Name)
 }
 
-// buildCLILoreDeps mirrors buildCLICommandDeps but opens lore.db. The
-// Embed field is populated lazily at handler invocation time via
-// wireCLIEmbedOnHandler so we do not pay the BGE probe cost for CLI
-// commands that never touch the vector path (every verb outside
-// inscribe/update/reforge/appraise). Every lore handler already
-// tolerates a nil Embed pointer per ADR-003 nil-safety.
+// buildCLILoreDeps mirrors buildCLICommandDeps but opens lore.db.
+// ExecRemote routes Handlers through a live, version-matched daemon
+// when one is up, falling back to local execution on any transport
+// failure. Embed defers wireCLIEmbedDeps to first LOCAL Handler use
+// via cliLoreEmbedSource, so verbs that never touch the vector path
+// (and daemon-routed runs, served by the daemon's shared embedder)
+// skip the BGE probe cost entirely. Every lore handler tolerates a nil
+// resolved *EmbedDeps per ADR-003 nil-safety.
 func buildCLILoreDeps() command.Deps {
-	d := command.Deps{
+	return command.Deps{
 		OpenDB: openLoreDB,
 		ResolveProj: func(ctx context.Context, argProject string) (string, error) {
 			db, err := openLoreDB(ctx)
@@ -584,14 +587,9 @@ func buildCLILoreDeps() command.Deps {
 		},
 		Now:           time.Now,
 		LoreValidDays: cliLoreValidDays,
+		ExecRemote:    remoteExecViaDaemon,
+		Embed:         &cliLoreEmbedSource{},
 	}
-	// command.Deps.Embed is `any`; setting it to a typed-nil pointer
-	// would become a non-nil interface. Assign only when the wiring
-	// yielded a real EmbedDeps.
-	if e := wireCLIEmbedDeps(); e != nil {
-		d.Embed = e
-	}
-	return d
 }
 
 // cliLoreValidDays surfaces the merged [inscribe.valid_days] windows to

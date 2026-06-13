@@ -5,10 +5,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mathomhaus/guild/internal/command"
+	"github.com/mathomhaus/guild/internal/daemon"
 )
 
 // TestMain scrubs the agent-mode detection env vars before the package
@@ -17,6 +19,13 @@ import (
 // asking an agent to run `make check`), the harness markers would flip
 // every registry verb into agent mode and fail those assertions. Tests
 // that exercise detection re-set markers via t.Setenv.
+//
+// It also pins the daemon-routing probe to "not running": a developer's
+// LIVE daemon (discovered via the real ~/.guild/daemon.json) must never
+// receive traffic from this package's verb invocations: routed verbs
+// would execute against the daemon's real databases instead of the
+// test-scoped overrides. Routing tests install their own probe via
+// swapRouteProbe.
 func TestMain(m *testing.M) {
 	for _, k := range []string{
 		"GUILD_AGENT",
@@ -26,6 +35,9 @@ func TestMain(m *testing.M) {
 		"CURSOR_AGENT",
 	} {
 		_ = os.Unsetenv(k)
+	}
+	routeProbeFn = func(string, time.Duration) (daemon.ProbeResult, daemon.Discovery, error) {
+		return daemon.NotRunning, daemon.Discovery{}, nil
 	}
 	os.Exit(m.Run())
 }

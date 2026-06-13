@@ -65,6 +65,11 @@ type Config struct {
 	// Sessions serves each shim connection. Required.
 	Sessions SessionHandler
 
+	// Exec executes one terminal CLI verb on behalf of a routed client
+	// (JSON-exec RPC, see execrpc.go). Nil answers exec preambles with
+	// a dispatch error so clients fall back to local execution.
+	Exec ExecHandler
+
 	// EmbedderState supplies the embedder_state field of the status
 	// response. Nil reports "unknown".
 	EmbedderState func(ctx context.Context) string
@@ -246,6 +251,13 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 
 	if pre.StatusRequest != nil {
 		s.writeStatus(ctx, conn)
+		return
+	}
+
+	if pre.Exec != nil {
+		// Exec connections are one-shot RPCs, not MCP sessions: they
+		// never touch the active-session count.
+		s.serveExec(ctx, br, conn, *pre.Exec)
 		return
 	}
 

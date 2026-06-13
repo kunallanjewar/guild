@@ -52,8 +52,13 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 	// receives the session handler as a seam.
 	host := mcp.NewDaemonHost()
 	srv, err := daemon.NewServer(daemon.Config{
-		Version:       version,
-		Sessions:      host.ServeSession,
+		Version:  version,
+		Sessions: host.ServeSession,
+		// Terminal CLI verbs routed over the JSON-exec RPC execute here
+		// with CLI-equivalent Deps; the shared embed providers keep one
+		// embedder per daemon process across MCP sessions and routed
+		// CLI searches alike.
+		Exec:          cli.NewDaemonExecHandler(host.QuestEmbedSource(), host.LoreEmbedSource()),
 		EmbedderState: host.EmbedderState,
 		Logger:        host.Logger(),
 	})

@@ -84,16 +84,18 @@ type Status struct {
 }
 
 // preamble is the wire shape of the first ndjson line on every
-// accepted connection. Exactly one of the two fields must be present:
+// accepted connection. Exactly one of the three fields must be present:
 //
 //	{"guild_shim":{"version":"v0.3.2","cwd":"/path/to/project","pid":12345}}
 //	{"guild_status_request":{}}
+//	{"guild_exec":{"tool":"quest_post","version":"v0.3.2","cwd":"/path","pid":12345}}
 //
-// omitempty keeps the marshaled form (the shim's outbound preamble)
+// omitempty keeps the marshaled form (a client's outbound preamble)
 // down to exactly the one key that is present.
 type preamble struct {
 	Shim          *ShimPreamble `json:"guild_shim,omitempty"`
 	StatusRequest *struct{}     `json:"guild_status_request,omitempty"`
+	Exec          *ExecPreamble `json:"guild_exec,omitempty"`
 }
 
 // readPreamble consumes the first newline-terminated line from br and
@@ -110,11 +112,16 @@ func readPreamble(br *bufio.Reader) (*preamble, error) {
 	if err := json.Unmarshal(line, p); err != nil {
 		return nil, fmt.Errorf("daemon: parse preamble: %w", err)
 	}
+	variants := 0
+	for _, present := range []bool{p.Shim != nil, p.StatusRequest != nil, p.Exec != nil} {
+		if present {
+			variants++
+		}
+	}
+	if variants != 1 {
+		return nil, fmt.Errorf("daemon: preamble must carry exactly one of guild_shim, guild_status_request, guild_exec (got %d)", variants)
+	}
 	switch {
-	case p.Shim != nil && p.StatusRequest != nil:
-		return nil, errors.New("daemon: preamble carries both guild_shim and guild_status_request")
-	case p.Shim == nil && p.StatusRequest == nil:
-		return nil, errors.New("daemon: preamble carries neither guild_shim nor guild_status_request")
 	case p.Shim != nil:
 		if p.Shim.PID <= 0 {
 			return nil, fmt.Errorf("daemon: shim preamble pid %d is not a valid process id", p.Shim.PID)
@@ -124,6 +131,19 @@ func readPreamble(br *bufio.Reader) (*preamble, error) {
 			// working directory during project inference: exactly the
 			// context bleed the preamble exists to prevent.
 			return nil, errors.New("daemon: shim preamble has empty cwd")
+		}
+	case p.Exec != nil:
+		if p.Exec.Tool == "" {
+			return nil, errors.New("daemon: exec preamble has empty tool")
+		}
+		if p.Exec.CWD == "" {
+			// Same context-bleed rationale as the shim preamble: project
+			// resolution must anchor on the CLIENT's cwd, never the
+			// daemon's.
+			return nil, errors.New("daemon: exec preamble has empty cwd")
+		}
+		if p.Exec.PID <= 0 {
+			return nil, fmt.Errorf("daemon: exec preamble pid %d is not a valid process id", p.Exec.PID)
 		}
 	}
 	return p, nil

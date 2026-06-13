@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -123,6 +124,18 @@ type Deps struct {
 	// never break a tool call. See internal/hints/engine.go for the
 	// reference implementation wired into Register().
 	EvaluateHints EvaluateHintsFunc
+	// ExecRemote, when non-nil, gives the cobra adapter a transport for
+	// running a verb's Handler inside the guild daemon (registry
+	// JSON-exec, ADR-005 Part 1). The adapter ships json.Marshal(I) and
+	// decodes the returned json.Marshal(O); CLIFormat then renders the
+	// round-tripped O locally, so terminal output stays byte-identical.
+	//
+	// Error contract: returning a *RemoteHandlerError means the Handler
+	// ran remotely and failed (final, never re-run locally); any other
+	// error means the transport failed and the adapter falls back to the
+	// local Handler. Only CLI-side Deps set this; MCP-side Deps and the
+	// daemon's own exec Deps leave it nil.
+	ExecRemote func(ctx context.Context, req RemoteExecRequest) (json.RawMessage, error)
 	// Embed is the optional embedding-pipeline port. The field type is
 	// `any` so the command package does not import internal/lore (which
 	// would create a cycle: lore registers commands, command depends on
