@@ -42,6 +42,9 @@ jobs:
             readme
             deps
             issues
+            daemon
+            sleep
+            hooks
           requireScope: false
           subjectPattern: ^[^A-Z].+$
           subjectPatternError: |
