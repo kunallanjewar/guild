@@ -4,7 +4,7 @@
 //  1. Built-in defaults (this file)
 //  2. ~/.guild/config.toml      (user-wide)
 //  3. <repo>/.guild/config.toml (per-project overrides)
-//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON)
+//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON, GUILD_NO_SLEEP)
 //  5. CLI flags                  (via pflag.FlagSet)
 package config
 
@@ -68,6 +68,31 @@ type TelemetryConfig struct {
 	UsageLog bool `toml:"usage_log"`
 }
 
+// SleepConfig controls the daemon's idle dream-pass scheduler: after
+// IdleMinutes of no MCP or CLI activity, the resident daemon spends one
+// bounded pass on autonomous maintenance (consolidation, echo renewal,
+// embed backfill). The scheduler only fires inside `guild daemon run`;
+// the no-daemon path never reaches this code.
+type SleepConfig struct {
+	// Enabled lets the running daemon fire idle dream passes. On by
+	// default because daemon.autostart is on from day one: a user who
+	// opts out of the daemon entirely never runs this path. Set false in
+	// [sleep] config, or pass GUILD_NO_SLEEP=1, to keep the daemon
+	// serving but never dreaming.
+	Enabled bool `toml:"enabled"`
+
+	// IdleMinutes is how long the daemon must see no MCP request and no
+	// CLI exec RPC before a dream pass becomes due. It also gates the
+	// gap between passes: a new pass never starts within IdleMinutes of
+	// the previous pass ending.
+	IdleMinutes int `toml:"idle_minutes"`
+
+	// PassBudgetSeconds is the wall budget handed to each pass. A pass
+	// that overruns is cancelled mid-step and journaled as partial, so
+	// the daemon never blocks serving on a long pass.
+	PassBudgetSeconds int `toml:"pass_budget_seconds"`
+}
+
 // DaemonConfig controls the optional background daemon.
 type DaemonConfig struct {
 	// Autostart lets the first MCP shim that finds no running daemon
@@ -102,6 +127,7 @@ type Config struct {
 	Inscribe  InscribeConfig  `toml:"inscribe"`
 	Telemetry TelemetryConfig `toml:"telemetry"`
 	Daemon    DaemonConfig    `toml:"daemon"`
+	Sleep     SleepConfig     `toml:"sleep"`
 }
 
 // defaults returns a Config populated with the built-in baseline values.
@@ -140,6 +166,20 @@ func defaults() Config {
 			// --no-daemon flag, or [daemon] autostart = false opt out and
 			// restore the byte-identical no-daemon path.
 			Autostart: true,
+		},
+		Sleep: SleepConfig{
+			// On by default for the same reason as daemon.autostart:
+			// the scheduler only runs inside a daemon, and opting out of
+			// the daemon (GUILD_NO_DAEMON / --no-daemon) already disables
+			// it. GUILD_NO_SLEEP=1 or [sleep] enabled = false keeps the
+			// daemon serving but never dreaming.
+			Enabled: true,
+			// Ten idle minutes before a pass, with a sixty-second wall
+			// budget per pass: the ADR cost note requires that dreaming
+			// never makes a waking session feel slower, so passes stay
+			// short and new activity preempts them.
+			IdleMinutes:       10,
+			PassBudgetSeconds: 60,
 		},
 	}
 }

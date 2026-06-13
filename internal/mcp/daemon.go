@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/mathomhaus/guild/internal/daemon"
+	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/session"
+	"github.com/mathomhaus/guild/internal/sleep"
 )
 
 // DaemonHost is the per-process state behind `guild daemon run`: the
@@ -125,6 +128,80 @@ func (h *DaemonHost) EmbedderState(ctx context.Context) string {
 		return "unknown"
 	}
 	return state
+}
+
+// ─────────────── idle dream-pass wiring (ADR-005 Phase 2) ───────────
+// Everything below is the host's half of the daemon idle scheduler: it
+// turns the host's shared db handles and embed provider into a
+// daemon.PassFunc the scheduler can fire. The scheduler itself (WHEN to
+// dream) lives in internal/daemon; this seam supplies WHAT one pass
+// runs by handing the sleep runner a per-pass context. Keeping it here
+// means internal/daemon never imports internal/sleep or internal/mcp.
+
+// sleepPassMaxAutoOps caps how many auto-policy mutations one idle pass
+// may apply across all steps; sleepPassMaxQuestPosts caps the quests it
+// may post; sleepPassMaxRenewalPosts caps lore-renewal quests per pass.
+// They are conservative because an idle pass runs unattended: a small
+// cap means a backlog drains over several passes rather than flooding
+// the board or the journal in one. The steps enforce them; the runner
+// only threads them through.
+const (
+	sleepPassMaxAutoOps      = 50
+	sleepPassMaxQuestPosts   = 10
+	sleepPassMaxRenewalPosts = 5
+)
+
+// SleepPassRunner returns the daemon.PassFunc the idle scheduler fires.
+// Each call opens fresh lore.db and quest.db handles (the same per-call
+// open discipline every MCP tool uses; WAL mode makes this cheap),
+// resolves the shared embedder, builds a daemon-idle PassContext, and
+// runs the registered steps under the scheduler's wall budget. With the
+// step registry empty (this campaign's step quests register their own),
+// a pass journals a pass row with zero steps and returns cleanly.
+//
+// The returned func honors ctx cancellation: the runner threads it into
+// every step, so a waking session that preempts the pass cancels its
+// work and the runner still stamps the pass row ended.
+func (h *DaemonHost) SleepPassRunner() daemon.PassFunc {
+	return func(ctx context.Context, budget time.Duration) (daemon.PassOutcome, error) {
+		loreDB, err := openLoreDB(ctx)
+		if err != nil {
+			return daemon.PassOutcome{}, fmt.Errorf("mcp: sleep pass: open lore db: %w", err)
+		}
+		defer func() { _ = loreDB.Close() }()
+
+		questDB, err := openQuestDB(ctx)
+		if err != nil {
+			return daemon.PassOutcome{}, fmt.Errorf("mcp: sleep pass: open quest db: %w", err)
+		}
+		defer func() { _ = questDB.Close() }()
+
+		var embed *lore.EmbedDeps
+		if h.providers != nil && h.providers.embed != nil {
+			// nil deps is the documented BM25-only fallback; the embed
+			// step tolerates it as a clean no-op.
+			embed = h.providers.embed.ResolveEmbedDeps(ctx)
+		}
+
+		pc := &sleep.PassContext{
+			LoreDB:  loreDB,
+			QuestDB: questDB,
+			Embed:   embed,
+			Logger:  h.logger,
+			Trigger: sleep.TriggerDaemonIdle,
+			Caps: sleep.Caps{
+				MaxAutoOps:      sleepPassMaxAutoOps,
+				MaxQuestPosts:   sleepPassMaxQuestPosts,
+				MaxRenewalPosts: sleepPassMaxRenewalPosts,
+			},
+		}
+
+		res, err := sleep.Run(ctx, pc, sleep.Steps(), budget)
+		if err != nil {
+			return daemon.PassOutcome{}, fmt.Errorf("mcp: sleep pass: %w", err)
+		}
+		return daemon.PassOutcome{Partial: res.Partial, Steps: len(res.Steps)}, nil
+	}
 }
 
 // daemonSessionStore builds the per-connection session identity: the

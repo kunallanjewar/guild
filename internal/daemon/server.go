@@ -74,6 +74,12 @@ type Config struct {
 	// response. Nil reports "unknown".
 	EmbedderState func(ctx context.Context) string
 
+	// Scheduler is the idle dream-pass scheduler (ADR-005 Phase 2). When
+	// non-nil, Run drives its loop for the daemon's lifetime and every
+	// served session/exec touches it as activity. Nil means a daemon
+	// that serves but never dreams (the minimal Phase 1 behavior).
+	Scheduler *Scheduler
+
 	// Logger receives the daemon's structured stderr log lines. Nil
 	// falls back to slog.Default(). Never log to stdout: the daemon
 	// owns no protocol stream on stdout, and keeping it silent leaves
@@ -189,6 +195,20 @@ func (s *Server) Run(ctx context.Context) error {
 	defer cancelConns()
 
 	var wg sync.WaitGroup
+
+	// ── idle dream-pass scheduler (ADR-005 Phase 2) ──────────────────
+	// The scheduler shares connCtx so daemon shutdown cancels its loop
+	// (and any in-flight pass) alongside the connections. It is the only
+	// goroutine started here besides the accept loop; a nil Scheduler
+	// keeps the minimal Phase 1 behavior (serve, never dream).
+	if s.cfg.Scheduler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.cfg.Scheduler.Run(connCtx)
+		}()
+	}
+
 	acceptErr := make(chan error, 1)
 	go func() {
 		for {
@@ -262,6 +282,13 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	}
 
 	shim := *pre.Shim
+	// Activity for the idle scheduler: a session attaching is the
+	// clearest "the operator is awake" signal the daemon layer sees, and
+	// it preempts any in-flight dream pass so the new session never waits
+	// on dreaming. The session-end touch below brackets the session so
+	// the idle clock starts from when the LAST session detached, not from
+	// when it attached.
+	s.touch()
 	s.log.Info("daemon: session start",
 		"shim_pid", shim.PID,
 		"shim_version", shim.Version,
@@ -269,6 +296,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		"active", s.active.Add(1),
 	)
 	defer func() {
+		s.touch()
 		s.log.Info("daemon: session end",
 			"shim_pid", shim.PID,
 			"active", s.active.Add(-1),
@@ -302,6 +330,16 @@ func (s *Server) writeStatus(ctx context.Context, conn net.Conn) {
 	_ = conn.SetWriteDeadline(time.Now().Add(preambleTimeout))
 	if _, err := conn.Write(append(data, '\n')); err != nil {
 		s.log.Warn("daemon: write status", "err", err)
+	}
+}
+
+// touch records activity on the idle scheduler when one is wired. A nil
+// Scheduler (minimal Phase 1 daemon) makes it a no-op, so the activity
+// hooks at the session and exec entry points cost nothing when sleep is
+// not configured.
+func (s *Server) touch() {
+	if s.cfg.Scheduler != nil {
+		s.cfg.Scheduler.Touch()
 	}
 }
 
