@@ -4,7 +4,7 @@
 //  1. Built-in defaults (this file)
 //  2. ~/.guild/config.toml      (user-wide)
 //  3. <repo>/.guild/config.toml (per-project overrides)
-//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON, GUILD_NO_SLEEP)
+//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON, GUILD_NO_SLEEP, GUILD_NO_WATCH)
 //  5. CLI flags                  (via pflag.FlagSet)
 package config
 
@@ -103,6 +103,31 @@ type DaemonConfig struct {
 	// it off the shim never spawns and the process behaves exactly as a
 	// build without daemon support: probe-and-fall-through only.
 	Autostart bool `toml:"autostart"`
+
+	// Watch lets the running daemon watch every registered project root
+	// for file and git activity and turn it into lore staleness signals
+	// and capped renewal quests within seconds. On by default for the
+	// same reason as autostart: the watcher only runs inside a daemon,
+	// and opting out of the daemon already disables it. Set false in
+	// [daemon] config, or pass GUILD_NO_WATCH=1, to keep the daemon
+	// serving (and still dreaming) but never watching; staleness then
+	// falls back to the query-time check, exactly as the no-daemon path.
+	Watch bool `toml:"watch"`
+
+	// RenewalCapPerPass bounds how many renewal quests the watcher posts
+	// per debounced event batch, across all entries that batch flagged.
+	// Dedupe still suppresses a second open renewal quest for an entry,
+	// so the cap only limits a burst; entries left over are picked up on
+	// the next event or the idle dream pass. Non-positive means post
+	// nothing (the watcher records signals but mints no quests).
+	RenewalCapPerPass int `toml:"renewal_cap_per_pass"`
+
+	// WatchDebounceMS is the quiet window, in milliseconds, the watcher
+	// waits after the last raw filesystem event before emitting one
+	// normalized event. Non-positive uses the watcher's built-in default
+	// (one second), which coalesces an editor's atomic-save burst into a
+	// single event.
+	WatchDebounceMS int `toml:"watch_debounce_ms"`
 }
 
 // Config is the merged, validated configuration for a guild process.
@@ -166,6 +191,16 @@ func defaults() Config {
 			// --no-daemon flag, or [daemon] autostart = false opt out and
 			// restore the byte-identical no-daemon path.
 			Autostart: true,
+			// Watch on by default so a daemon-on install gets
+			// event-driven staleness for free. GUILD_NO_WATCH=1 or
+			// [daemon] watch = false keeps the daemon serving without a
+			// watcher goroutine. Three renewal quests per event batch is
+			// the same conservative per-pass cap the idle scheduler uses:
+			// a burst drains over several events instead of flooding the
+			// board. Zero debounce uses the watcher's one-second default.
+			Watch:             true,
+			RenewalCapPerPass: 3,
+			WatchDebounceMS:   0,
 		},
 		Sleep: SleepConfig{
 			// On by default for the same reason as daemon.autostart:
