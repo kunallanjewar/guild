@@ -7,11 +7,13 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 ## Verbs
 
 - [`guild daemon`](#guild-daemon) — guild daemon subcommands
+- [`guild daemon install`](#guild-daemon-install) — install the guild daemon as a login service (launchd agent / systemd user unit)
 - [`guild daemon restart`](#guild-daemon-restart) — restart the guild daemon (stop, then start)
 - [`guild daemon run`](#guild-daemon-run) — run the guild daemon in the foreground (MCP sessions over a unix socket)
 - [`guild daemon start`](#guild-daemon-start) — start the guild daemon in the background
 - [`guild daemon status`](#guild-daemon-status) — show whether the guild daemon is running
 - [`guild daemon stop`](#guild-daemon-stop) — stop the running guild daemon
+- [`guild daemon uninstall`](#guild-daemon-uninstall) — remove the guild daemon login service
 - [`guild hints`](#guild-hints) — hint engine inspection + administration
 - [`guild hints disable`](#guild-hints-disable) — disable a rule
 - [`guild hints enable`](#guild-hints-enable) — re-enable a previously disabled rule
@@ -89,6 +91,42 @@ guild daemon subcommands
 ```
 guild daemon
 ```
+
+## `guild daemon install`
+
+install the guild daemon as a login service (launchd agent / systemd user unit)
+
+**Usage**
+
+```
+guild daemon install
+```
+
+Installs the guild daemon as an always-on login service:
+
+  macOS  writes ~/Library/LaunchAgents/com.mathomhaus.guild.daemon.plist
+         and loads it via 'launchctl bootstrap gui/$UID' (falling back to
+         the legacy 'launchctl load -w' on older systems)
+  Linux  writes ~/.config/systemd/user/guild-daemon.service (honoring
+         $XDG_CONFIG_HOME) and runs 'systemctl --user daemon-reload'
+         followed by 'systemctl --user enable --now'
+
+The unit executes this binary's resolved absolute path with 'daemon
+run'; re-run install after moving the binary. A warning (not an error)
+is printed when the resolved path looks transient (temp or go-build
+directory), since the unit would break the next time that directory is
+cleaned.
+
+The service manager owns the daemon process from here: it starts it at
+login and keeps it alive, so 'guild daemon stop' only pauses it until
+the next restart. Use 'guild daemon uninstall' to remove the service
+permanently. The daemon writes its own log to ~/.guild/daemon.log; the
+unit captures no stdout/stderr of its own.
+
+Idempotent: repeat installs re-render the unit file in place and reload
+it, never creating duplicates. When launchctl/systemctl is not on PATH
+the rendered unit and manual load instructions are printed instead and
+the command still succeeds.
 
 ## `guild daemon restart`
 
@@ -199,6 +237,24 @@ run its own cleanup).
 
 Idempotent: exits 0 both when a daemon was stopped and when none was
 running.
+
+## `guild daemon uninstall`
+
+remove the guild daemon login service
+
+**Usage**
+
+```
+guild daemon uninstall
+```
+
+Removes the login service created by 'guild daemon install': asks the
+service manager to drop the unit ('launchctl bootout' on macOS,
+'systemctl --user disable --now' on Linux) and deletes the unit file.
+
+Idempotent: exits 0 when no unit is installed or the unit was never
+loaded. When launchctl/systemctl is not on PATH the unit file is still
+removed and manual unload instructions are printed.
 
 ## `guild hints`
 
