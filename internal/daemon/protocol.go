@@ -81,6 +81,36 @@ type Status struct {
 	// ("enabled", "disabled", ...), or "unknown" when it cannot be
 	// read.
 	EmbedderState string `json:"embedder_state"`
+	// Watch reports the watch -> staleness -> renewal pipeline's state:
+	// whether it is enabled, currently watching, how many project roots,
+	// and the cumulative events / signals / renewal quests since the
+	// daemon started. Always present; a daemon with watch disabled
+	// reports Enabled=false and zero counters.
+	Watch WatchStatus `json:"watch"`
+}
+
+// WatchStatus is the status-line view of the daemon's watch pipeline. The
+// keys are stable and append-only, mirroring [PipelineStatus] across the
+// socket so `guild daemon status` can render watcher health.
+type WatchStatus struct {
+	// Enabled is false when no watcher was ever started (config or env
+	// opt-out); every counter below is then zero.
+	Enabled bool `json:"enabled"`
+	// Watching is true while a watcher is live. False with Enabled true
+	// is the visible "degraded to query-time staleness" signal.
+	Watching bool `json:"watching"`
+	// ProjectsWatched is the number of project roots the live watcher
+	// covers.
+	ProjectsWatched int `json:"projects_watched"`
+	// EventsSeen counts debounced file/git events consumed since start.
+	EventsSeen int64 `json:"events_seen"`
+	// SignalsRecorded counts staleness signal rows written since start.
+	SignalsRecorded int64 `json:"signals_recorded"`
+	// QuestsPosted counts renewal quests minted since start.
+	QuestsPosted int64 `json:"quests_posted"`
+	// LastError is the most recent watcher build or event error, empty
+	// when none has occurred.
+	LastError string `json:"last_error,omitempty"`
 }
 
 // preamble is the wire shape of the first ndjson line on every
