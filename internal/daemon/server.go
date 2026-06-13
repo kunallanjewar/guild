@@ -100,6 +100,16 @@ type Config struct {
 	// behavior as a Phase 1 daemon.
 	Registry *Registry
 
+	// Reaper is the lease reaper (ADR-005 Phase 3). When non-nil, Run
+	// drives its sweep tick for the daemon's lifetime: each sweep forfeits
+	// the zombie claim behind any expired lease whose session has gone
+	// (the agent crashed) so the work returns to the board instead of
+	// rotting in_progress. It scans task_leases only, so a claim accepted
+	// without the daemon is never touched. Nil means a daemon that serves
+	// without ever reaping; lapsed leases then linger until something else
+	// (a re-accept, a manual forfeit) clears them.
+	Reaper *Reaper
+
 	// Logger receives the daemon's structured stderr log lines. Nil
 	// falls back to slog.Default(). Never log to stdout: the daemon
 	// owns no protocol stream on stdout, and keeping it silent leaves
@@ -254,6 +264,20 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			s.cfg.Registry.Run(connCtx)
+		}()
+	}
+
+	// ── lease reaper (ADR-005 Phase 3) ───────────────────────────────
+	// Shares connCtx so daemon shutdown cancels the sweep tick alongside
+	// the connections. A nil Reaper keeps the daemon serving without ever
+	// forfeiting a lapsed lease; the work then waits for a re-accept or a
+	// manual forfeit. It runs in its own goroutine and never blocks the
+	// accept loop (see reaper.go).
+	if s.cfg.Reaper != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.cfg.Reaper.Run(connCtx)
 		}()
 	}
 

@@ -1097,12 +1097,15 @@ func TestDefaultsDaemonLeaseHeartbeat(t *testing.T) {
 	if d.HeartbeatIntervalSeconds != 30 {
 		t.Errorf("daemon.heartbeat_interval default: got %d want 30", d.HeartbeatIntervalSeconds)
 	}
+	if d.ReapIntervalSeconds != 60 {
+		t.Errorf("daemon.reap_interval default: got %d want 60", d.ReapIntervalSeconds)
+	}
 }
 
 func TestFileLayerDaemonLeaseHeartbeatKnobs(t *testing.T) {
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "config.toml")
-	body := "[daemon]\nlease_ttl = 1200\nheartbeat_interval = 45\n"
+	body := "[daemon]\nlease_ttl = 1200\nheartbeat_interval = 45\nreap_interval = 90\n"
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1115,6 +1118,9 @@ func TestFileLayerDaemonLeaseHeartbeatKnobs(t *testing.T) {
 	}
 	if cfg.Daemon.HeartbeatIntervalSeconds != 45 {
 		t.Errorf("heartbeat_interval: got %d want 45", cfg.Daemon.HeartbeatIntervalSeconds)
+	}
+	if cfg.Daemon.ReapIntervalSeconds != 90 {
+		t.Errorf("reap_interval: got %d want 90", cfg.Daemon.ReapIntervalSeconds)
 	}
 }
 
@@ -1166,6 +1172,10 @@ func TestLoadDaemonLeaseInvalidFallsBackToDefault(t *testing.T) {
 	if cfg.Daemon.HeartbeatIntervalSeconds != base.Daemon.HeartbeatIntervalSeconds {
 		t.Errorf("heartbeat_interval = -5 should fall back to default %d, got %d",
 			base.Daemon.HeartbeatIntervalSeconds, cfg.Daemon.HeartbeatIntervalSeconds)
+	}
+	if cfg.Daemon.ReapIntervalSeconds != base.Daemon.ReapIntervalSeconds {
+		t.Errorf("reap_interval unset should keep default %d, got %d",
+			base.Daemon.ReapIntervalSeconds, cfg.Daemon.ReapIntervalSeconds)
 	}
 }
 

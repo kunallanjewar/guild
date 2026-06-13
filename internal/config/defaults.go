@@ -145,6 +145,14 @@ type DaemonConfig struct {
 	// expires a live lease. Only the daemon reads it. Non-positive falls
 	// back to the built-in default.
 	HeartbeatIntervalSeconds int `toml:"heartbeat_interval"`
+
+	// ReapIntervalSeconds is the cadence at which the daemon's lease
+	// reaper sweeps for expired leases and auto-forfeits the zombie claim
+	// behind any whose session has gone (the agent crashed), returning the
+	// work to the board. It scans task_leases only, so a claim accepted
+	// without the daemon is never touched. Only the daemon reads it.
+	// Non-positive falls back to the built-in default.
+	ReapIntervalSeconds int `toml:"reap_interval"`
 }
 
 // Config is the merged, validated configuration for a guild process.
@@ -226,6 +234,10 @@ func defaults() Config {
 			// lapses one TTL later for a reaper to forfeit.
 			LeaseTTLSeconds:          600,
 			HeartbeatIntervalSeconds: 30,
+			// Sweep for expired leases once a minute: a crashed agent's
+			// claim returns to the board within about one TTL plus one
+			// sweep, and the scan over expired rows only is negligible load.
+			ReapIntervalSeconds: 60,
 		},
 		Sleep: SleepConfig{
 			// On by default for the same reason as daemon.autostart:

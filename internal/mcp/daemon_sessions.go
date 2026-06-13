@@ -33,6 +33,11 @@ import (
 const (
 	defaultDaemonLeaseTTL          = 10 * time.Minute
 	defaultDaemonHeartbeatInterval = 30 * time.Second
+	// defaultDaemonReapInterval is how often the lease reaper sweeps for
+	// expired leases when config did not supply a value. A minute keeps a
+	// lapsed lease (a crashed agent's claim) returning to the board within
+	// about one TTL plus one interval while the scan stays negligible load.
+	defaultDaemonReapInterval = time.Minute
 )
 
 // daemonSessionID maps a shim pid to the daemon's per-session identity
@@ -66,12 +71,20 @@ func (h *DaemonHost) resolveSessionProject(ctx context.Context, store SessionSto
 // had not landed yet. Renewal failure is non-fatal: the session is leaving
 // regardless, and the lease's TTL still covers the gap.
 //
+// It then closes the session's lease acquirer, releasing the long-lived
+// quest.db handle that acquirer held for the session's lifetime, so
+// per-session handles do not accumulate over the daemon's life across
+// connect/disconnect cycles. The acquirer is closed AFTER the final
+// renewal because that renewal opens its own short-lived handle and does
+// not depend on the acquirer's; closing is a safe no-op when no acquirer
+// was wired (a db-open failure on attach degraded the session to no leases).
+//
 // sessionCtx is the (by-now cancelled) connection context. The final
 // renewal needs a live deadline because that context is already done, so
 // it runs under a short timeout derived with context.WithoutCancel:
 // inherits the session's values, drops its cancellation, so the quick
 // local write is not skipped just because the session ended.
-func (h *DaemonHost) detachSession(sessionCtx context.Context, sessionID string) {
+func (h *DaemonHost) detachSession(sessionCtx context.Context, sessionID string, acquirer *quest.DBLeaseAcquirer) {
 	if h.registry == nil {
 		return
 	}
@@ -81,6 +94,12 @@ func (h *DaemonHost) detachSession(sessionCtx context.Context, sessionID string)
 		h.logger.Warn("daemon: final session lease renewal failed on detach; relying on lease TTL",
 			"session", sessionID, "err", err.Error())
 	}
+	if acquirer != nil {
+		if err := acquirer.Close(); err != nil {
+			h.logger.Warn("daemon: closing session lease db handle failed on detach",
+				"session", sessionID, "err", err.Error())
+		}
+	}
 	h.registry.Unregister(sessionID)
 }
 
@@ -88,11 +107,12 @@ func (h *DaemonHost) detachSession(sessionCtx context.Context, sessionID string)
 // command.Deps.Lease. It opens a quest.db handle bound to the acquirer for
 // the session's lifetime: a daemon session is long-lived, so the per-call
 // open discipline the short-lived MCP tools use would mean re-opening on
-// every accept; one handle per session is the right granularity here and
-// is closed implicitly when the daemon process exits. A db-open failure
-// degrades to no lease acquirer (nil), so the session still serves and
-// just behaves like the no-daemon path for leases.
-func (h *DaemonHost) newLeaseAcquirer(ctx context.Context, sessionID string) any {
+// every accept; one handle per session is the right granularity here. The
+// handle is closed by detachSession when the connection drops (via the
+// acquirer's Close), so handles do not accumulate over the daemon's life.
+// A db-open failure degrades to no lease acquirer (nil), so the session
+// still serves and just behaves like the no-daemon path for leases.
+func (h *DaemonHost) newLeaseAcquirer(ctx context.Context, sessionID string) *quest.DBLeaseAcquirer {
 	db, err := openQuestDB(ctx)
 	if err != nil {
 		h.logger.Warn("daemon: lease acquirer unavailable; session runs without leases",
@@ -103,6 +123,40 @@ func (h *DaemonHost) newLeaseAcquirer(ctx context.Context, sessionID string) any
 		DB:        db,
 		SessionID: sessionID,
 		TTL:       h.leaseTTL,
+	}
+}
+
+// reapSeam returns the daemon.ReapFunc the lease reaper's sweep tick calls.
+// It opens a fresh quest.db handle and runs one quest.ReapExpiredLeases
+// pass, threading the registry's IsLive predicate so a still-registered
+// session's lapsed lease is a missed heartbeat (left for the tick to renew)
+// rather than a crash. Per-call open matches the renewal and boot-grace
+// seams; WAL makes it cheap and a sweep is infrequent (tens of seconds). A
+// missing leases table (a quest.db that never took a lease) is a clean
+// no-op because ExpiredLeases returns zero rows.
+func (h *DaemonHost) reapSeam() daemon.ReapFunc {
+	return func(ctx context.Context) (daemon.ReapOutcome, error) {
+		db, err := openQuestDB(ctx)
+		if err != nil {
+			return daemon.ReapOutcome{}, fmt.Errorf("mcp: lease reap: open quest db: %w", err)
+		}
+		defer func() { _ = db.Close() }()
+
+		isLive := func(sessionID string) bool { return false }
+		if h.registry != nil {
+			isLive = h.registry.IsLive
+		}
+
+		res, err := quest.ReapExpiredLeases(ctx, db, time.Now().UTC(), isLive)
+		if err != nil {
+			return daemon.ReapOutcome{}, fmt.Errorf("mcp: lease reap: %w", err)
+		}
+		return daemon.ReapOutcome{
+			Scanned:        res.Scanned,
+			Forfeited:      res.Forfeited,
+			SkippedLive:    res.SkippedLive,
+			OrphansCleared: res.OrphansCleared,
+		}, nil
 	}
 }
 

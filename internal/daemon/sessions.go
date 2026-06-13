@@ -227,6 +227,21 @@ func (r *Registry) Touch(sessionID string) {
 	r.mu.Unlock()
 }
 
+// IsLive reports whether sessionID is currently registered (a live shim
+// connection). The lease reaper consults it before forfeiting an expired
+// lease: a still-registered session is a missed heartbeat under load, not a
+// crash, so the reaper leaves that lease for the next tick to renew instead
+// of forfeiting a live agent's work. An empty id is never live.
+func (r *Registry) IsLive(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	r.mu.Lock()
+	_, ok := r.sessions[sessionID]
+	r.mu.Unlock()
+	return ok
+}
+
 // Count returns the number of live sessions. It is the cheap active-count
 // seam the presence consumer (a follow-on quest) reads without taking a
 // full snapshot.
