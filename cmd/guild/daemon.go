@@ -53,12 +53,20 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 	// receives the session handler as a seam.
 	host := mcp.NewDaemonHost()
 
-	// Idle dream-pass scheduler (ADR-005 Phase 2): resolve the [sleep]
-	// config and build a scheduler the daemon drives for its lifetime.
-	// The host supplies the per-pass runner (WHAT a pass does); the
-	// scheduler decides WHEN. A config-load failure should not block the
-	// daemon from serving, so it degrades to no scheduler with a warning.
-	scheduler := buildSleepScheduler(host)
+	// Resolve config once for both background loops: the [sleep] idle
+	// dream-pass scheduler and the [daemon] watch -> staleness -> renewal
+	// pipeline. A config-load failure should not block the daemon from
+	// serving, so each builder degrades to a disabled loop with a warning.
+	cfg := loadDaemonConfig(host)
+
+	// Idle dream-pass scheduler (ADR-005 Phase 2): the host supplies the
+	// per-pass runner (WHAT a pass does); the scheduler decides WHEN.
+	scheduler := buildSleepScheduler(host, cfg)
+
+	// Watch -> staleness -> renewal pipeline (ADR-005 Phase 4): the host
+	// supplies the roots enumerator and the per-event processor (WHAT one
+	// event does); the pipeline decides WHEN (a debounced file/git event).
+	pipeline := buildWatchPipeline(host, cfg)
 
 	srv, err := daemon.NewServer(daemon.Config{
 		Version:  version,
@@ -70,6 +78,7 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		Exec:          cli.NewDaemonExecHandler(host.QuestEmbedSource(), host.LoreEmbedSource()),
 		EmbedderState: host.EmbedderState,
 		Scheduler:     scheduler,
+		Pipeline:      pipeline,
 		Logger:        host.Logger(),
 	})
 	if err != nil {
@@ -82,17 +91,27 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-// buildSleepScheduler resolves the [sleep] config and returns the
-// daemon's idle dream-pass scheduler. Config load happens with nil
-// flags (the daemon run command has no sleep flags); a load failure
-// degrades to a disabled scheduler with a warning rather than blocking
-// the daemon from serving. The scheduler is always returned non-nil so
-// `guild daemon status` can report sleep state; SchedulerConfig.Enabled
-// gates whether it ever fires.
-func buildSleepScheduler(host *mcp.DaemonHost) *daemon.Scheduler {
+// loadDaemonConfig loads the merged config for the daemon's background
+// loops. Config load happens with nil flags (the daemon run command has
+// no sleep/watch flags); a load failure returns nil and the loop builders
+// fall back to disabled, so a bad config never blocks the daemon from
+// serving.
+func loadDaemonConfig(host *mcp.DaemonHost) *config.Config {
 	cfg, err := config.Load(nil)
 	if err != nil {
-		host.Logger().Warn("daemon: sleep config load failed; idle dream passes disabled", "err", err.Error())
+		host.Logger().Warn("daemon: config load failed; idle dream passes and watcher disabled", "err", err.Error())
+		return nil
+	}
+	return cfg
+}
+
+// buildSleepScheduler returns the daemon's idle dream-pass scheduler from
+// the pre-loaded config. A nil cfg (load failure) degrades to a disabled
+// scheduler. The scheduler is always returned non-nil so `guild daemon
+// status` can report sleep state; SchedulerConfig.Enabled gates whether it
+// ever fires.
+func buildSleepScheduler(host *mcp.DaemonHost, cfg *config.Config) *daemon.Scheduler {
+	if cfg == nil {
 		return daemon.NewScheduler(daemon.SchedulerConfig{Enabled: false, Logger: host.Logger()})
 	}
 	return daemon.NewScheduler(daemon.SchedulerConfig{
@@ -101,6 +120,27 @@ func buildSleepScheduler(host *mcp.DaemonHost) *daemon.Scheduler {
 		Budget:  time.Duration(cfg.Sleep.PassBudgetSeconds) * time.Second,
 		Pass:    host.SleepPassRunner(),
 		Logger:  host.Logger(),
+	})
+}
+
+// buildWatchPipeline returns the daemon's watch -> staleness -> renewal
+// pipeline from the pre-loaded config. A nil cfg (load failure) degrades
+// to a disabled pipeline. The pipeline is always returned non-nil so
+// `guild daemon status` can report watcher state; PipelineConfig.Enabled
+// (driven by [daemon] watch) gates whether a watcher ever starts. The
+// host supplies the roots enumerator and per-event processor so
+// internal/daemon stays free of internal/lore, internal/quest, and
+// internal/project.
+func buildWatchPipeline(host *mcp.DaemonHost, cfg *config.Config) *daemon.Pipeline {
+	if cfg == nil {
+		return daemon.NewPipeline(daemon.PipelineConfig{Enabled: false, Logger: host.Logger()})
+	}
+	return daemon.NewPipeline(daemon.PipelineConfig{
+		Enabled:  cfg.Daemon.Watch,
+		Roots:    host.WatchRoots(),
+		Process:  host.WatchProcessor(cfg.Daemon.RenewalCapPerPass),
+		Debounce: time.Duration(cfg.Daemon.WatchDebounceMS) * time.Millisecond,
+		Logger:   host.Logger(),
 	})
 }
 
@@ -177,6 +217,7 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "guild daemon: running pid=%d version=%s uptime=%s sessions=%d embedder=%s socket=%s\n",
 			rep.Status.PID, rep.Status.Version, rep.Uptime,
 			rep.Status.ActiveSessions, rep.Status.EmbedderState, rep.SocketPath)
+		fmt.Fprintln(out, formatWatchLine(rep.Status.Watch))
 		if rep.DriftNudge != "" {
 			fmt.Fprintln(out, rep.DriftNudge)
 		}
@@ -194,19 +235,52 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// formatWatchLine renders the watch pipeline's one-line status under the
+// daemon's running line. It reads at a glance: off (opt-out), degraded
+// (enabled but no live watcher), or watching N projects with cumulative
+// event / signal / renewal counters.
+func formatWatchLine(w daemon.WatchStatus) string {
+	if !w.Enabled {
+		return "  watch: disabled"
+	}
+	state := "watching"
+	if !w.Watching {
+		state = "degraded (query-time staleness)"
+	}
+	line := fmt.Sprintf("  watch: %s projects=%d events=%d signals=%d renewals=%d",
+		state, w.ProjectsWatched, w.EventsSeen, w.SignalsRecorded, w.QuestsPosted)
+	if w.LastError != "" {
+		line += fmt.Sprintf(" last_error=%q", w.LastError)
+	}
+	return line
+}
+
 // daemonStatusView is the --json shape of `guild daemon status`. Keys
 // are stable; additions are append-only.
 type daemonStatusView struct {
-	Running        bool   `json:"running"`
-	PID            int    `json:"pid,omitempty"`
-	Version        string `json:"version,omitempty"`
-	SelfVersion    string `json:"self_version"`
-	StartedAt      string `json:"started_at,omitempty"`
-	UptimeSeconds  int64  `json:"uptime_seconds"`
-	ActiveSessions int    `json:"active_sessions"`
-	EmbedderState  string `json:"embedder_state,omitempty"`
-	SocketPath     string `json:"socket_path,omitempty"`
-	VersionDrift   bool   `json:"version_drift"`
+	Running        bool             `json:"running"`
+	PID            int              `json:"pid,omitempty"`
+	Version        string           `json:"version,omitempty"`
+	SelfVersion    string           `json:"self_version"`
+	StartedAt      string           `json:"started_at,omitempty"`
+	UptimeSeconds  int64            `json:"uptime_seconds"`
+	ActiveSessions int              `json:"active_sessions"`
+	EmbedderState  string           `json:"embedder_state,omitempty"`
+	SocketPath     string           `json:"socket_path,omitempty"`
+	VersionDrift   bool             `json:"version_drift"`
+	Watch          *daemonWatchView `json:"watch,omitempty"`
+}
+
+// daemonWatchView is the --json shape of the watch pipeline state. Present
+// only when the daemon is running (so a not-running report stays minimal).
+type daemonWatchView struct {
+	Enabled         bool   `json:"enabled"`
+	Watching        bool   `json:"watching"`
+	ProjectsWatched int    `json:"projects_watched"`
+	EventsSeen      int64  `json:"events_seen"`
+	SignalsRecorded int64  `json:"signals_recorded"`
+	QuestsPosted    int64  `json:"quests_posted"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 // writeDaemonStatusJSON emits the one-object JSON form of a status
@@ -225,6 +299,16 @@ func writeDaemonStatusJSON(out io.Writer, rep daemon.StatusReport) error {
 		view.ActiveSessions = rep.Status.ActiveSessions
 		view.EmbedderState = rep.Status.EmbedderState
 		view.SocketPath = rep.SocketPath
+		w := rep.Status.Watch
+		view.Watch = &daemonWatchView{
+			Enabled:         w.Enabled,
+			Watching:        w.Watching,
+			ProjectsWatched: w.ProjectsWatched,
+			EventsSeen:      w.EventsSeen,
+			SignalsRecorded: w.SignalsRecorded,
+			QuestsPosted:    w.QuestsPosted,
+			LastError:       w.LastError,
+		}
 	}
 	data, err := json.Marshal(view)
 	if err != nil {
