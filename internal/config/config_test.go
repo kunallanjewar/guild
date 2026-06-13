@@ -865,3 +865,146 @@ func TestLoadDaemonAutostartLayerPrecedence(t *testing.T) {
 		t.Error("GUILD_NO_DAEMON=1 must force autostart off over any file layer")
 	}
 }
+
+// ---- unit: sleep ----------------------------------------------------------
+
+func TestDefaultsSleep(t *testing.T) {
+	d := defaults()
+	if !d.Sleep.Enabled {
+		t.Error("sleep.enabled default: got false, want true (on with the daemon)")
+	}
+	if d.Sleep.IdleMinutes != 10 {
+		t.Errorf("sleep.idle_minutes default: got %d want 10", d.Sleep.IdleMinutes)
+	}
+	if d.Sleep.PassBudgetSeconds != 60 {
+		t.Errorf("sleep.pass_budget_seconds default: got %d want 60", d.Sleep.PassBudgetSeconds)
+	}
+}
+
+func TestFileLayerSleepAllKeys(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	content := "[sleep]\nenabled = false\nidle_minutes = 30\npass_budget_seconds = 120\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Sleep.Enabled {
+		t.Error("[sleep] enabled = false should turn sleep off")
+	}
+	if cfg.Sleep.IdleMinutes != 30 {
+		t.Errorf("idle_minutes: got %d want 30", cfg.Sleep.IdleMinutes)
+	}
+	if cfg.Sleep.PassBudgetSeconds != 120 {
+		t.Errorf("pass_budget_seconds: got %d want 120", cfg.Sleep.PassBudgetSeconds)
+	}
+}
+
+func TestFileLayerSleepPartialKeepsLowerLayer(t *testing.T) {
+	// Only idle_minutes declared: enabled and pass_budget_seconds must
+	// keep their default values (per-key merge).
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(p, []byte("[sleep]\nidle_minutes = 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Sleep.IdleMinutes != 5 {
+		t.Errorf("idle_minutes: got %d want 5", cfg.Sleep.IdleMinutes)
+	}
+	if !cfg.Sleep.Enabled {
+		t.Error("enabled should remain default-true when the file omits it")
+	}
+	if cfg.Sleep.PassBudgetSeconds != 60 {
+		t.Errorf("pass_budget_seconds should remain default 60, got %d", cfg.Sleep.PassBudgetSeconds)
+	}
+}
+
+func TestFileLayerSleepAbsentKeepsDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(p, []byte("[scoring]\nw_fts = 0.5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if !cfg.Sleep.Enabled || cfg.Sleep.IdleMinutes != 10 || cfg.Sleep.PassBudgetSeconds != 60 {
+		t.Errorf("a file without [sleep] must keep sleep defaults, got %+v", cfg.Sleep)
+	}
+}
+
+func TestEnvLayerGUILD_NO_SLEEP(t *testing.T) {
+	t.Setenv("GUILD_NO_SLEEP", "1")
+	cfg := defaults()
+	envLayer(&cfg)
+	if cfg.Sleep.Enabled {
+		t.Error("GUILD_NO_SLEEP=1: sleep.enabled should be false")
+	}
+}
+
+func TestEnvLayerGUILD_NO_SLEEP_Empty(t *testing.T) {
+	t.Setenv("GUILD_NO_SLEEP", "")
+	cfg := defaults()
+	envLayer(&cfg)
+	if !cfg.Sleep.Enabled {
+		t.Error("empty GUILD_NO_SLEEP: sleep.enabled should remain default-true")
+	}
+}
+
+// TestLoadSleepEnabledLayerPrecedence walks sleep.enabled through the
+// layers: default-true, a user file flips it off, a repo file flips it
+// back on, and finally GUILD_NO_SLEEP wins as the highest opt-out.
+func TestLoadSleepEnabledLayerPrecedence(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+
+	userGuildDir := filepath.Join(home, ".guild")
+	if err := os.MkdirAll(userGuildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userGuildDir, "config.toml"),
+		[]byte("[sleep]\nenabled = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTOML(t, repo, "[sleep]\nenabled = true\n")
+
+	t.Setenv("HOME", home)
+	t.Setenv("GUILD_PROJECT", "")
+	t.Setenv("GUILD_NO_USAGE_LOG", "")
+	t.Setenv("GUILD_NO_EMOJI", "")
+	t.Setenv("GUILD_NO_SLEEP", "")
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Sleep.Enabled {
+		t.Error("repo enabled=true should beat user enabled=false")
+	}
+
+	t.Setenv("GUILD_NO_SLEEP", "1")
+	cfg, err = Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Sleep.Enabled {
+		t.Error("GUILD_NO_SLEEP=1 must force sleep off over any file layer")
+	}
+}

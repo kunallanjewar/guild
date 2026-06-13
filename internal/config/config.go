@@ -104,6 +104,15 @@ func fileLayer(path string, dst *Config) error {
 	if md.IsDefined("daemon", "autostart") {
 		dst.Daemon.Autostart = tmp.Daemon.Autostart
 	}
+	if md.IsDefined("sleep", "enabled") {
+		dst.Sleep.Enabled = tmp.Sleep.Enabled
+	}
+	if md.IsDefined("sleep", "idle_minutes") {
+		dst.Sleep.IdleMinutes = tmp.Sleep.IdleMinutes
+	}
+	if md.IsDefined("sleep", "pass_budget_seconds") {
+		dst.Sleep.PassBudgetSeconds = tmp.Sleep.PassBudgetSeconds
+	}
 	return nil
 }
 
@@ -148,6 +157,8 @@ func mergeValidDays(path string, fromFile map[string]int, dst *Config) error {
 //   - GUILD_NO_EMOJI=1     → Config.NoEmoji = true
 //   - GUILD_NO_DAEMON=1    → Config.Daemon.Autostart = false (also stops the
 //     shim from dialing or spawning a daemon for this process)
+//   - GUILD_NO_SLEEP=1     → Config.Sleep.Enabled = false (the running daemon
+//     keeps serving but never fires an idle dream pass)
 func envLayer(dst *Config) {
 	if v := os.Getenv("GUILD_PROJECT"); v != "" {
 		dst.Project = v
@@ -161,6 +172,9 @@ func envLayer(dst *Config) {
 	}
 	if parseBoolEnv("GUILD_NO_DAEMON") {
 		dst.Daemon.Autostart = false
+	}
+	if parseBoolEnv("GUILD_NO_SLEEP") {
+		dst.Sleep.Enabled = false
 	}
 }
 

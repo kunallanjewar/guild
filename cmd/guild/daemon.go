@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mathomhaus/guild/internal/cli"
+	"github.com/mathomhaus/guild/internal/config"
 	"github.com/mathomhaus/guild/internal/daemon"
 	"github.com/mathomhaus/guild/internal/mcp"
 )
@@ -51,6 +52,14 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 	// every session. The daemon server itself stays MCP-agnostic and
 	// receives the session handler as a seam.
 	host := mcp.NewDaemonHost()
+
+	// Idle dream-pass scheduler (ADR-005 Phase 2): resolve the [sleep]
+	// config and build a scheduler the daemon drives for its lifetime.
+	// The host supplies the per-pass runner (WHAT a pass does); the
+	// scheduler decides WHEN. A config-load failure should not block the
+	// daemon from serving, so it degrades to no scheduler with a warning.
+	scheduler := buildSleepScheduler(host)
+
 	srv, err := daemon.NewServer(daemon.Config{
 		Version:  version,
 		Sessions: host.ServeSession,
@@ -60,6 +69,7 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		// CLI searches alike.
 		Exec:          cli.NewDaemonExecHandler(host.QuestEmbedSource(), host.LoreEmbedSource()),
 		EmbedderState: host.EmbedderState,
+		Scheduler:     scheduler,
 		Logger:        host.Logger(),
 	})
 	if err != nil {
@@ -70,6 +80,28 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("daemon run: %w", err)
 	}
 	return nil
+}
+
+// buildSleepScheduler resolves the [sleep] config and returns the
+// daemon's idle dream-pass scheduler. Config load happens with nil
+// flags (the daemon run command has no sleep flags); a load failure
+// degrades to a disabled scheduler with a warning rather than blocking
+// the daemon from serving. The scheduler is always returned non-nil so
+// `guild daemon status` can report sleep state; SchedulerConfig.Enabled
+// gates whether it ever fires.
+func buildSleepScheduler(host *mcp.DaemonHost) *daemon.Scheduler {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		host.Logger().Warn("daemon: sleep config load failed; idle dream passes disabled", "err", err.Error())
+		return daemon.NewScheduler(daemon.SchedulerConfig{Enabled: false, Logger: host.Logger()})
+	}
+	return daemon.NewScheduler(daemon.SchedulerConfig{
+		Enabled: cfg.Sleep.Enabled,
+		Idle:    time.Duration(cfg.Sleep.IdleMinutes) * time.Minute,
+		Budget:  time.Duration(cfg.Sleep.PassBudgetSeconds) * time.Second,
+		Pass:    host.SleepPassRunner(),
+		Logger:  host.Logger(),
+	})
 }
 
 // ───────────────────────── lifecycle verbs ──────────────────────────

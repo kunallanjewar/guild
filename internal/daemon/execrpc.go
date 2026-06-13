@@ -104,6 +104,14 @@ type execResponse struct {
 // line, dispatch, one response line. The caller (serveConn) closes the
 // connection afterwards.
 func (s *Server) serveExec(ctx context.Context, br *bufio.Reader, conn net.Conn, pre ExecPreamble) {
+	// Activity for the idle scheduler: a routed CLI verb is a waking
+	// operator just like an MCP session. Touch on entry (preempting any
+	// in-flight dream pass before the verb runs) and again on return
+	// (below) so a long verb like an embed rebuild brackets the idle
+	// clock. Touch is a no-op when no scheduler is wired (Phase 1).
+	s.touch()
+	defer s.touch()
+
 	if pre.Version != s.cfg.Version {
 		s.log.Warn("daemon: exec refused on version skew",
 			"tool", pre.Tool, "client_version", pre.Version, "daemon_version", s.cfg.Version, "client_pid", pre.PID)
