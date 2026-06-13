@@ -176,6 +176,24 @@ func (a *DBLeaseAcquirer) AcquireLease(ctx context.Context, projectID, taskID, h
 	return AcquireLease(ctx, a.DB, projectID, taskID, a.SessionID, holder, nowFn().UTC(), ttl)
 }
 
+// Close releases the long-lived quest.db handle the acquirer opened for
+// its session. The daemon opens one acquirer per attached session and
+// keeps the handle for the session's lifetime (so accepts and activity
+// renewals do not re-open per call); detachSession calls Close when the
+// connection drops so per-session handles do not accumulate over the
+// daemon's life across connect/disconnect cycles. A nil acquirer or a nil
+// DB is a safe no-op, and Close is idempotent: it nils DB after closing so
+// a double Close (detach racing a shutdown) does not double-close the
+// handle.
+func (a *DBLeaseAcquirer) Close() error {
+	if a == nil || a.DB == nil {
+		return nil
+	}
+	db := a.DB
+	a.DB = nil
+	return db.Close()
+}
+
 // RenewLeaseActivity refreshes the touched quest's lease when this
 // session holds it, the LeaseRenewer implementation the mutating quest
 // handlers invoke. It scopes the renewal to (project, task, session) so a

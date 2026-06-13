@@ -89,7 +89,12 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		// owns the registry (ServeSession registers each connection on it);
 		// the daemon Server drives its tick for the daemon's lifetime.
 		Registry: host.Registry(),
-		Logger:   host.Logger(),
+		// Lease reaper (ADR-005 Phase 3): the host owns the reaper (its
+		// sweep consults the registry for session liveness and forfeits the
+		// zombie claim behind any lapsed lease); the daemon Server drives
+		// its sweep tick for the daemon's lifetime.
+		Reaper: host.Reaper(),
+		Logger: host.Logger(),
 	})
 	if err != nil {
 		return fmt.Errorf("daemon run: %w", err)
@@ -127,6 +132,7 @@ func buildDaemonHost(cfg *config.Config) *mcp.DaemonHost {
 	return mcp.NewDaemonHostWithLeases(
 		time.Duration(cfg.Daemon.LeaseTTLSeconds)*time.Second,
 		time.Duration(cfg.Daemon.HeartbeatIntervalSeconds)*time.Second,
+		time.Duration(cfg.Daemon.ReapIntervalSeconds)*time.Second,
 	)
 }
 

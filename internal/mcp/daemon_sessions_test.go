@@ -182,7 +182,7 @@ func TestDaemonBootGraceRenewsExistingLeases(t *testing.T) {
 
 	// Build the host with a known TTL and run its boot-grace seam directly.
 	const ttl = 10 * time.Minute
-	host := NewDaemonHostWithLeases(ttl, 30*time.Second)
+	host := NewDaemonHostWithLeases(ttl, 30*time.Second, time.Minute)
 	t.Cleanup(host.providers.closeHintsEngine)
 	if err := host.bootGraceSeam()(ctx); err != nil {
 		t.Fatalf("boot grace: %v", err)
@@ -209,6 +209,193 @@ func TestDaemonBootGraceRenewsExistingLeases(t *testing.T) {
 	}
 }
 
+// TestDaemonReapSeam_ForfeitsExpiredZombie verifies the host's reap seam
+// end to end: an expired lease whose session is NOT registered is
+// auto-forfeited (status returns to next), while a still-registered
+// session's expired lease is skipped (a missed heartbeat, not a crash).
+func TestDaemonReapSeam_ForfeitsExpiredZombie(t *testing.T) {
+	home := isolateHome(t)
+	const projID = "reapproj"
+	projDir := home + "/ws/" + projID
+	questID := seedProjectAndQuest(t, projID, projDir)
+
+	ctx := context.Background()
+	host := NewDaemonHost()
+	t.Cleanup(host.providers.closeHintsEngine)
+
+	// Claim the quest and plant an already-expired lease keyed by a session
+	// that is NOT in the registry (the agent crashed: shim gone, session
+	// unregistered).
+	const crashedSession = "990200"
+	db, err := openQuestDB(ctx)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	if _, err := quest.Accept(ctx, db, projID, questID, "alice"); err != nil {
+		_ = db.Close()
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := quest.AcquireLease(ctx, db, projID, questID, crashedSession, "alice",
+		time.Now().UTC().Add(-time.Hour), time.Minute); err != nil {
+		_ = db.Close()
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	_ = db.Close()
+
+	out, err := host.reapSeam()(ctx)
+	if err != nil {
+		t.Fatalf("reap seam: %v", err)
+	}
+	if out.Forfeited != 1 {
+		t.Fatalf("Forfeited = %d, want 1 (outcome=%+v)", out.Forfeited, out)
+	}
+
+	// The crashed agent's claim is back on the board.
+	checkDB, err := openQuestDB(ctx)
+	if err != nil {
+		t.Fatalf("reopen quest db: %v", err)
+	}
+	defer func() { _ = checkDB.Close() }()
+	q, err := quest.Load(ctx, checkDB, projID, questID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if q.Status != quest.StatusNext {
+		t.Errorf("status = %q, want next after auto-forfeit", q.Status)
+	}
+}
+
+// TestDaemonReapSeam_SkipsLiveSession verifies the seam consults the
+// registry: an expired lease whose session is STILL registered is a missed
+// heartbeat, not a crash, so the reaper leaves the claim alone.
+func TestDaemonReapSeam_SkipsLiveSession(t *testing.T) {
+	home := isolateHome(t)
+	const projID = "reaplive"
+	projDir := home + "/ws/" + projID
+	questID := seedProjectAndQuest(t, projID, projDir)
+
+	ctx := context.Background()
+	host := NewDaemonHost()
+	t.Cleanup(host.providers.closeHintsEngine)
+
+	const liveSession = "990300"
+	host.Registry().Register(liveSession, projID, time.Now().UTC())
+
+	db, err := openQuestDB(ctx)
+	if err != nil {
+		t.Fatalf("open quest db: %v", err)
+	}
+	if _, err := quest.Accept(ctx, db, projID, questID, "alice"); err != nil {
+		_ = db.Close()
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := quest.AcquireLease(ctx, db, projID, questID, liveSession, "alice",
+		time.Now().UTC().Add(-time.Hour), time.Minute); err != nil {
+		_ = db.Close()
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	_ = db.Close()
+
+	out, err := host.reapSeam()(ctx)
+	if err != nil {
+		t.Fatalf("reap seam: %v", err)
+	}
+	if out.Forfeited != 0 {
+		t.Errorf("Forfeited = %d, want 0 (session still live)", out.Forfeited)
+	}
+	if out.SkippedLive != 1 {
+		t.Errorf("SkippedLive = %d, want 1", out.SkippedLive)
+	}
+
+	checkDB, err := openQuestDB(ctx)
+	if err != nil {
+		t.Fatalf("reopen quest db: %v", err)
+	}
+	defer func() { _ = checkDB.Close() }()
+	q, err := quest.Load(ctx, checkDB, projID, questID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if q.Status != quest.StatusInProgress {
+		t.Errorf("status = %q, want in_progress (live session untouched)", q.Status)
+	}
+}
+
+// TestDaemonDetach_ClosesLeaseHandle verifies the fold-in: detachSession
+// closes the session's lease acquirer, releasing the long-lived quest.db
+// handle that acquirer held. After detach the acquirer's DB is nil and the
+// handle is closed, so a Ping fails.
+func TestDaemonDetach_ClosesLeaseHandle(t *testing.T) {
+	home := isolateHome(t)
+	const projID = "detachproj"
+	projDir := home + "/ws/" + projID
+	registerCWDAsProject(t, projID, projDir)
+
+	ctx := context.Background()
+	host := NewDaemonHost()
+	t.Cleanup(host.providers.closeHintsEngine)
+
+	sessionID := daemonSessionID(990001)
+	host.Registry().Register(sessionID, projID, time.Now().UTC())
+	acquirer := host.newLeaseAcquirer(ctx, sessionID)
+	if acquirer == nil || acquirer.DB == nil {
+		t.Fatal("newLeaseAcquirer returned no usable acquirer")
+	}
+	db := acquirer.DB
+
+	host.detachSession(ctx, sessionID, acquirer)
+
+	if acquirer.DB != nil {
+		t.Error("acquirer.DB not nil after detach; Close should have released the handle")
+	}
+	if err := db.PingContext(ctx); err == nil {
+		t.Error("Ping on the detached acquirer's handle succeeded; want closed")
+	}
+	// Idempotent: a second Close (a detach racing a shutdown) is a no-op.
+	if err := acquirer.Close(); err != nil {
+		t.Errorf("second Close = %v, want nil (idempotent)", err)
+	}
+}
+
+// TestDaemonConnectDetach_NoHandleLeak is the fold-in leak guard: many
+// connect/detach cycles must not accumulate open quest.db handles for the
+// life of the daemon process. Each cycle opens one acquirer handle and
+// detach closes it, so the count of open sql connections across all live
+// acquirers stays bounded at zero between cycles rather than growing with
+// the cycle count.
+func TestDaemonConnectDetach_NoHandleLeak(t *testing.T) {
+	home := isolateHome(t)
+	const projID = "leakproj"
+	projDir := home + "/ws/" + projID
+	registerCWDAsProject(t, projID, projDir)
+
+	ctx := context.Background()
+	host := NewDaemonHost()
+	t.Cleanup(host.providers.closeHintsEngine)
+
+	const cycles = 25
+	for i := 0; i < cycles; i++ {
+		sessionID := daemonSessionID(990100 + i)
+		host.Registry().Register(sessionID, projID, time.Now().UTC())
+		acquirer := host.newLeaseAcquirer(ctx, sessionID)
+		if acquirer == nil {
+			t.Fatalf("cycle %d: newLeaseAcquirer returned nil", i)
+		}
+		host.detachSession(ctx, sessionID, acquirer)
+
+		// The handle this cycle opened is closed: the acquirer no longer
+		// owns an open pool. If detach leaked the handle, acquirer.DB would
+		// still be non-nil (and the underlying pool still open).
+		if acquirer.DB != nil {
+			t.Fatalf("cycle %d: acquirer.DB still set after detach; handle leaked", i)
+		}
+	}
+	// The registry is empty again, so no live session retains a handle.
+	if got := host.Registry().Count(); got != 0 {
+		t.Fatalf("registry count after %d connect/detach cycles = %d, want 0", cycles, got)
+	}
+}
+
 // TestDaemonSession_RenewSeamRefreshesHeldLease verifies the heartbeat
 // renewal seam (the one the registry tick calls) pushes a held lease's
 // expiry forward.
@@ -232,7 +419,7 @@ func TestDaemonSession_RenewSeamRefreshesHeldLease(t *testing.T) {
 	}
 	_ = db.Close()
 
-	host := NewDaemonHostWithLeases(10*time.Minute, 30*time.Second)
+	host := NewDaemonHostWithLeases(10*time.Minute, 30*time.Second, time.Minute)
 	t.Cleanup(host.providers.closeHintsEngine)
 	if err := host.renewLeasesSeam()(ctx, sessionID); err != nil {
 		t.Fatalf("renew seam: %v", err)

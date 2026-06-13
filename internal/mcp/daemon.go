@@ -40,6 +40,12 @@ type DaemonHost struct {
 	// and an accept stamp the same expiry math.
 	registry *daemon.Registry
 	leaseTTL time.Duration
+
+	// reaper is the daemon's lease reaper (ADR-005 Phase 3). Its sweep
+	// consults registry.IsLive (a still-registered session is a missed
+	// heartbeat, not a crash) and forfeits the zombie claim behind any
+	// genuinely lapsed lease. The daemon Server drives reaper.Run.
+	reaper *daemon.Reaper
 }
 
 // Compile-time check: ServeSession satisfies the daemon package's
@@ -47,22 +53,26 @@ type DaemonHost struct {
 var _ daemon.SessionHandler = (*DaemonHost)(nil).ServeSession
 
 // NewDaemonHost constructs the shared bundle for one daemon process with
-// the default lease timings (built-in TTL and heartbeat interval). Call
-// once per `guild daemon run`; pass ServeSession and EmbedderState into
-// daemon.Config, and Registry() into daemon.Config.Registry.
+// the default lease timings (built-in TTL, heartbeat interval, and reap
+// interval). Call once per `guild daemon run`; pass ServeSession and
+// EmbedderState into daemon.Config, Registry() into daemon.Config.Registry,
+// and Reaper() into daemon.Config.Reaper.
 func NewDaemonHost() *DaemonHost {
-	return NewDaemonHostWithLeases(defaultDaemonLeaseTTL, defaultDaemonHeartbeatInterval)
+	return NewDaemonHostWithLeases(defaultDaemonLeaseTTL, defaultDaemonHeartbeatInterval, defaultDaemonReapInterval)
 }
 
 // NewDaemonHostWithLeases constructs the shared bundle with explicit lease
 // timings resolved from config. A non-positive value falls back to the
-// built-in default so a misconfigured daemon still heartbeats.
-func NewDaemonHostWithLeases(leaseTTL, heartbeatInterval time.Duration) *DaemonHost {
+// built-in default so a misconfigured daemon still heartbeats and reaps.
+func NewDaemonHostWithLeases(leaseTTL, heartbeatInterval, reapInterval time.Duration) *DaemonHost {
 	if leaseTTL <= 0 {
 		leaseTTL = defaultDaemonLeaseTTL
 	}
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = defaultDaemonHeartbeatInterval
+	}
+	if reapInterval <= 0 {
+		reapInterval = defaultDaemonReapInterval
 	}
 	h := &DaemonHost{
 		providers: NewProviders(),
@@ -76,6 +86,11 @@ func NewDaemonHostWithLeases(leaseTTL, heartbeatInterval time.Duration) *DaemonH
 		BootGrace:         h.bootGraceSeam(),
 		Logger:            h.logger,
 	})
+	h.reaper = daemon.NewReaper(daemon.ReaperConfig{
+		Interval: reapInterval,
+		Reap:     h.reapSeam(),
+		Logger:   h.logger,
+	})
 	return h
 }
 
@@ -83,6 +98,11 @@ func NewDaemonHostWithLeases(leaseTTL, heartbeatInterval time.Duration) *DaemonH
 // into daemon.Config.Registry. The daemon Server drives Registry.Run for
 // the daemon's lifetime.
 func (h *DaemonHost) Registry() *daemon.Registry { return h.registry }
+
+// Reaper exposes the host's lease reaper so cmd/guild can wire it into
+// daemon.Config.Reaper. The daemon Server drives Reaper.Run for the
+// daemon's lifetime.
+func (h *DaemonHost) Reaper() *daemon.Reaper { return h.reaper }
 
 // Logger exposes the env-configured stderr logger (GUILD_MCP_LOG_FORMAT
 // / GUILD_MCP_LOG_LEVEL) so cmd/guild can hand the daemon listener the
@@ -140,8 +160,19 @@ func (h *DaemonHost) ServeSession(ctx context.Context, shim daemon.ShimPreamble,
 	if h.registry != nil {
 		proj := h.resolveSessionProject(ctx, store)
 		h.registry.Register(sessionID, proj, time.Now().UTC())
-		defer h.detachSession(ctx, sessionID)
-		lease = h.newLeaseAcquirer(ctx, sessionID)
+		// The acquirer owns a long-lived quest.db handle; detachSession
+		// closes it (and runs the final renewal + unregister) when the
+		// connection drops. A nil acquirer (db-open failure on attach)
+		// degrades the session to the no-lease path; detach handles nil.
+		acquirer := h.newLeaseAcquirer(ctx, sessionID)
+		defer h.detachSession(ctx, sessionID, acquirer)
+		// Threaded onto Deps.Lease as the documented `any` seam. A nil
+		// *DBLeaseAcquirer must become a true nil interface so the
+		// leaseFromDeps type assertion sees absence, not a typed-nil that
+		// would panic on use; only wire a non-nil acquirer.
+		if acquirer != nil {
+			lease = acquirer
+		}
 	}
 
 	srv, err := NewServer(Options{

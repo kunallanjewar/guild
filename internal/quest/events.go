@@ -35,6 +35,12 @@ const (
 	EventDone         = "done"
 	EventUnblocked    = "unblocked"
 	EventPMNextCalled = "pm_next_called"
+	// EventReleased marks a claim returned to the board: a user forfeit or
+	// a daemon reaper auto-forfeit of a lapsed lease both emit it. The value
+	// stays exactly "released" because Forfeit has persisted that literal
+	// string since before this constant existed; scroll and pulse readers
+	// filter on it, so changing the value would orphan every historical row.
+	EventReleased = "released"
 )
 
 // IsSystemNote reports whether the given note string begins with any known
