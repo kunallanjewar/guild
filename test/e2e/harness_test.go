@@ -91,12 +91,46 @@ func (c *container) guild(ctx context.Context, t *testing.T, args ...string) str
 // `guild init --yes` in it, registering the project (basename of
 // projectDir) in the container-local lore.db + quest.db. Returns the
 // init output for transcript recording.
+//
+// In daemon mode it then starts the in-container daemon (after init, so
+// the DB creation itself still runs on the plain in-process path) and
+// waits for readiness. Every MCP session opened afterward routes through
+// the daemon via the shim, and the same golden transcripts must still
+// hold: the ADR-005 Phase 1 byte-identical invariant.
 func (c *container) initProject(ctx context.Context, t *testing.T) string {
 	t.Helper()
 	if out, err := dockerCombined(ctx, "exec", c.name, "mkdir", "-p", projectDir); err != nil {
 		t.Fatalf("mkdir %s in %s: %v\n%s", projectDir, c.name, err, out)
 	}
-	return c.guild(ctx, t, "init", "--yes")
+	out := c.guild(ctx, t, "init", "--yes")
+	if suite.mode == modeDaemon {
+		c.startDaemon(ctx, t)
+	}
+	return out
+}
+
+// startDaemon launches the in-container daemon for daemon-mode runs and
+// blocks until `guild daemon status` reports it running. The container's
+// own teardown (docker rm -f) reaps the daemon process, so no separate
+// stop is needed; the wait keeps the first session from racing the
+// daemon's socket publication.
+func (c *container) startDaemon(ctx context.Context, t *testing.T) {
+	t.Helper()
+	_ = c.guild(ctx, t, "daemon", "start")
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out, err := dockerCombined(ctx,
+			"exec", "-w", projectDir, "-e", "GUILD_NO_UPDATE_CHECK=1",
+			c.name, "guild", "daemon", "status")
+		if err == nil {
+			return // exit 0 → running
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("in-container daemon did not become ready within 30s\nlast status:\n%s", out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // dockerCombined runs `docker argv...` with a deadline and returns

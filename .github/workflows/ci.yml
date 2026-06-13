@@ -30,6 +30,16 @@ jobs:
         run: go build -trimpath ./...
 
   # Run tests on each native host (cross-run isn't a thing for go test).
+  #
+  # This job also runs the daemon parity suite
+  # (tests/integration/daemon_parity_test.go): a single Go test that runs
+  # the canonical MCP + CLI scenarios twice (daemon-down and daemon-up)
+  # in two fresh isolated homes and asserts byte-identical scrubbed
+  # output. Both arms therefore run on each host below (ubuntu + macos),
+  # which is how the ADR-005 "no-daemon mode stays byte-identical; both
+  # modes run the same suite" invariant is enforced in CI. The suite is
+  # unix-only (the daemon listens on AF_UNIX); the Windows-tests-excluded
+  # note already matches.
   test:
     name: test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
