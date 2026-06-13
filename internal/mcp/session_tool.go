@@ -13,6 +13,7 @@ import (
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
 	"github.com/mathomhaus/guild/internal/release"
+	"github.com/mathomhaus/guild/internal/sleep"
 )
 
 // binaryVersion is the ldflags-stamped version string injected by
@@ -25,6 +26,31 @@ var binaryVersion = "dev"
 // so guild_session_start can emit an upgrade nudge when appropriate.
 // Called from cmd/guild/mcp.go init(), before the first MCP session.
 func SetBinaryVersion(v string) { binaryVersion = v }
+
+// sleepNarration loads the one-line "while you slept" summary by
+// consuming (claim + summarize, sleep.Narrate) every completed,
+// unnarrated sleep pass in the shared lore DB. Returns "" when there is
+// nothing to narrate. Package-level func var so tests can swap in a
+// stub without seeding a journal.
+//
+// All failures degrade to "": narration must never break session_start
+// on a cold, locked, or pre-migration DB (a journal-less DB reads as
+// "no passes"): the same resilience contract as the embedder-health
+// line in renderBounties. The narration reads only the shared DB, so it
+// behaves identically whether session_start is served in-process or by
+// the daemon.
+var sleepNarration = func(ctx context.Context) string {
+	loreDB, err := openLoreDB(ctx)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = loreDB.Close() }()
+	line, err := sleep.Narrate(ctx, loreDB, time.Time{})
+	if err != nil {
+		return ""
+	}
+	return line
+}
 
 // mcpProjectResolver is the Resolver used by handleSessionStart when the
 // agent omits the project arg and we need to auto-infer from the MCP
@@ -179,7 +205,19 @@ func (c *serverCore) handleSessionStart(
 		boardLine = fmt.Sprintf("📊 board: %d oaths, %d bounties, %d echoes\n", oathCount, bountyCount, echoCount)
 	}
 
-	full := header + "\n" + boardLine + "\n" + body
+	// "While you slept" narration: consume any completed, unnarrated
+	// sleep passes and surface them as one moon-prefixed line directly
+	// after the board summary (directly after the header in brief-only
+	// mode, which has no board line), before the briefing body, so
+	// collapsed-view clients still show it near the top. Empty when the
+	// journal has nothing to narrate, keeping the never-slept output
+	// byte-identical.
+	var sleepLine string
+	if line := sleepNarration(ctx); line != "" {
+		sleepLine = line + "\n"
+	}
+
+	full := header + "\n" + boardLine + sleepLine + "\n" + body
 	respBytes = uint(len(full))
 	return textResult(full), nil, nil
 }
