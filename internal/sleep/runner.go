@@ -49,6 +49,15 @@ type Caps struct {
 	// MaxQuestPosts bounds how many quests (renewal + approval) a
 	// single pass may post across all steps.
 	MaxQuestPosts int
+
+	// MaxRenewalPosts bounds how many lore-renewal quests the renewal
+	// step may post in a single pass, across all projects. Stale entries
+	// past the cap are journaled as overflow and picked up by a later
+	// pass (oldest-first via the poster's deterministic selection). Zero
+	// means "post nothing this pass"; the renewal step is the only
+	// caller, so a zero default keeps an unconfigured pass inert rather
+	// than flooding the board.
+	MaxRenewalPosts int
 }
 
 // PassContext carries everything a step needs to do its work. The
