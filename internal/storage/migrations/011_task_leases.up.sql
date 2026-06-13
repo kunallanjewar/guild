@@ -5,7 +5,7 @@
 -- heartbeats + presence"). Today a claim is a bare (claimed_by,
 -- claimed_at) pair on task_status with no notion of whether the claimant
 -- is still alive; a crashed agent's in_progress quest rots as a zombie
--- (the symptom QUEST-318 tracks). A daemon that sees every session can
+-- (the stale-in_progress-claim symptom). A daemon that sees every session can
 -- hold a lease with a heartbeat so an expired lease lets a watcher
 -- forfeit the stale claim instead of leaving it stuck.
 --
@@ -17,8 +17,8 @@
 --
 -- A SEPARATE table, not new columns on task_status, on purpose:
 --   (a) the compare-and-swap claim UPDATE in internal/quest/accept.go and
---       its single-statement auto-commit race contract (the QUEST-9
---       invariant) stay untouched;
+--       its single-statement auto-commit race contract (the concurrent
+--       claim-id-allocation invariant) stay untouched;
 --   (b) no-daemon operation writes zero lease rows, so its DB effects
 --       remain byte-identical to today. Lease rows are purely additive.
 --
