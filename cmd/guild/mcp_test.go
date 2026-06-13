@@ -22,6 +22,16 @@ func setTestHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 }
 
+// disableAutostart sets GUILD_NO_DAEMON so a probe-miss takes the
+// byte-identical no-daemon path instead of spawning a daemon. Used by
+// the tests that assert the opt-out behavior (silent, instant
+// fall-through); the autostart-on behavior is covered separately in
+// the daemon package.
+func disableAutostart(t *testing.T) {
+	t.Helper()
+	t.Setenv("GUILD_NO_DAEMON", "1")
+}
+
 // testSocket returns a listening unix socket in a short-named temp dir
 // (sun_path is capped near 104 bytes on darwin, and t.TempDir() paths
 // can exceed it).
@@ -44,12 +54,14 @@ func testSocket(t *testing.T) string {
 	return sock
 }
 
-// TestShimProbeBudget_NoDaemon pins the two probe-budget guarantees:
-// the configured dial timeout stays within the 250ms ceiling, and with
-// no daemon at all (no discovery file, so not even a dial) the whole
-// decision is effectively instant, with not a byte written anywhere.
+// TestShimProbeBudget_NoDaemon pins the two probe-budget guarantees on
+// the autostart-disabled (opt-out) path: the configured dial timeout
+// stays within the 250ms ceiling, and with no daemon at all (no
+// discovery file, so not even a dial) the whole decision is effectively
+// instant, with not a byte written anywhere.
 func TestShimProbeBudget_NoDaemon(t *testing.T) {
 	setTestHome(t)
+	disableAutostart(t)
 
 	if shimProbeTimeout > 250*time.Millisecond {
 		t.Fatalf("shimProbeTimeout = %v; must not exceed 250ms", shimProbeTimeout)
@@ -109,6 +121,7 @@ func TestTryDaemonShim_VersionMismatch_OneNudgeLine(t *testing.T) {
 // completely silent like the no-daemon case.
 func TestTryDaemonShim_StaleDiscovery_SilentInProcess(t *testing.T) {
 	setTestHome(t)
+	disableAutostart(t)
 
 	if err := daemon.WriteDiscovery(daemon.Discovery{
 		PID:        os.Getpid(),
@@ -126,5 +139,36 @@ func TestTryDaemonShim_StaleDiscovery_SilentInProcess(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("stale-discovery path produced output %q; must be silent", out.String())
+	}
+}
+
+// TestTryDaemonShim_OptOut_NoSideEffects pins the ADR-005 hard
+// invariant: with autostart disabled (GUILD_NO_DAEMON=1), a probe-miss
+// goes straight in-process with zero new side effects: no lock file
+// created, no spawn attempt, no output, and the decision stays instant.
+func TestTryDaemonShim_OptOut_NoSideEffects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	disableAutostart(t)
+
+	var out bytes.Buffer
+	start := time.Now()
+	done, err := tryDaemonShim(context.Background(), "v-self", &out)
+	elapsed := time.Since(start)
+
+	if done || err != nil {
+		t.Fatalf("opt-out probe-miss = (done=%v, err=%v); want (false, nil)", done, err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("opt-out path produced output %q; must be silent", out.String())
+	}
+	if elapsed > shimProbeTimeout {
+		t.Fatalf("opt-out probe took %v; budget is %v (no spawn or wait should happen)", elapsed, shimProbeTimeout)
+	}
+	// No lock file may exist: the opt-out path must never reach the
+	// election machinery. (~/.guild may not even have been created.)
+	lock := filepath.Join(home, ".guild", "daemon.lock")
+	if _, statErr := os.Stat(lock); statErr == nil {
+		t.Fatalf("opt-out path created %s; the no-daemon path must touch no lock file", lock)
 	}
 }

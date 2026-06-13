@@ -101,6 +101,9 @@ func fileLayer(path string, dst *Config) error {
 	if md.IsDefined("telemetry", "usage_log") {
 		dst.Telemetry.UsageLog = tmp.Telemetry.UsageLog
 	}
+	if md.IsDefined("daemon", "autostart") {
+		dst.Daemon.Autostart = tmp.Daemon.Autostart
+	}
 	return nil
 }
 
@@ -143,6 +146,8 @@ func mergeValidDays(path string, fromFile map[string]int, dst *Config) error {
 //   - GUILD_PROJECT        → Config.Project
 //   - GUILD_NO_USAGE_LOG=1 → Config.NoUsageLog = true; also sets Telemetry.UsageLog = false
 //   - GUILD_NO_EMOJI=1     → Config.NoEmoji = true
+//   - GUILD_NO_DAEMON=1    → Config.Daemon.Autostart = false (also stops the
+//     shim from dialing or spawning a daemon for this process)
 func envLayer(dst *Config) {
 	if v := os.Getenv("GUILD_PROJECT"); v != "" {
 		dst.Project = v
@@ -153,6 +158,9 @@ func envLayer(dst *Config) {
 	}
 	if parseBoolEnv("GUILD_NO_EMOJI") {
 		dst.NoEmoji = true
+	}
+	if parseBoolEnv("GUILD_NO_DAEMON") {
+		dst.Daemon.Autostart = false
 	}
 }
 
@@ -177,6 +185,7 @@ func parseBoolEnv(key string) bool {
 //   - --project / -p         → Config.Project
 //   - --no-emoji              → Config.NoEmoji
 //   - --no-usage-log          → Config.NoUsageLog
+//   - --no-daemon             → Config.Daemon.Autostart = false
 //   - --w-fts                 → Config.Scoring.WFTS
 //   - --w-recency             → Config.Scoring.WRecency
 func flagLayer(flags *pflag.FlagSet, dst *Config) {
@@ -186,6 +195,9 @@ func flagLayer(flags *pflag.FlagSet, dst *Config) {
 	applyStringFlag(flags, "project", &dst.Project)
 	applyBoolFlag(flags, "no-emoji", &dst.NoEmoji)
 	applyBoolFlag(flags, "no-usage-log", &dst.NoUsageLog)
+	// --no-daemon is a disable switch: when set it forces autostart off.
+	// Absent, it leaves whatever the lower layers resolved untouched.
+	applyDisableFlag(flags, "no-daemon", &dst.Daemon.Autostart)
 	applyFloat64Flag(flags, "w-fts", &dst.Scoring.WFTS)
 	applyFloat64Flag(flags, "w-recency", &dst.Scoring.WRecency)
 }
@@ -209,6 +221,21 @@ func applyBoolFlag(fs *pflag.FlagSet, name string, dst *bool) {
 	b, err := strconv.ParseBool(f.Value.String())
 	if err == nil {
 		*dst = b
+	}
+}
+
+// applyDisableFlag forces dst to false when a "--no-x" disable flag is
+// registered and was passed truthy on the command line. Used for knobs
+// whose flag name is the negation of the config field (e.g. --no-daemon
+// turning Daemon.Autostart off); an unset or false flag leaves dst at
+// the value the lower layers resolved.
+func applyDisableFlag(fs *pflag.FlagSet, name string, dst *bool) {
+	f := fs.Lookup(name)
+	if f == nil || !f.Changed {
+		return
+	}
+	if b, err := strconv.ParseBool(f.Value.String()); err == nil && b {
+		*dst = false
 	}
 }
 
