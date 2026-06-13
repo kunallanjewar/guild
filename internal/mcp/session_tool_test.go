@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
+	"github.com/mathomhaus/guild/internal/sleep"
 )
 
 // withStubbedResolver swaps mcpProjectResolver for the duration of a
@@ -667,5 +669,229 @@ func TestHandleSessionStart_DefaultPathUnchanged(t *testing.T) {
 	}
 	if got := textOf(resFalse.Content); got != body {
 		t.Errorf("brief_only=false body differs from arg-omitted body:\nomitted:\n%s\nfalse:\n%s", body, got)
+	}
+}
+
+// seedSleepPass writes one completed, unnarrated sleep pass into the
+// sandboxed lore DB (the journal's canonical home) with one auto-applied
+// meld op and one approval-gated proposal, so narration has both an
+// applied count and an awaiting-review count to surface.
+func seedSleepPass(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	ldb, err := openLoreDB(ctx)
+	if err != nil {
+		t.Fatalf("open lore db: %v", err)
+	}
+	defer func() { _ = ldb.Close() }()
+
+	started := time.Date(2026, 6, 1, 3, 0, 0, 0, time.UTC)
+	passID, err := sleep.BeginPass(ctx, ldb, sleep.TriggerDaemonIdle, time.Minute, started)
+	if err != nil {
+		t.Fatalf("sleep.BeginPass: %v", err)
+	}
+	if _, err := sleep.RecordOp(ctx, ldb, sleep.Op{
+		PassID:  passID,
+		Step:    "consolidation",
+		Policy:  sleep.PolicyAuto,
+		Kind:    sleep.OpMeldExactSupersede,
+		Target:  "LORE-1<-LORE-2",
+		Inverse: `{"status":"current"}`,
+		Applied: true,
+	}); err != nil {
+		t.Fatalf("sleep.RecordOp (auto): %v", err)
+	}
+	if _, err := sleep.RecordOp(ctx, ldb, sleep.Op{
+		PassID:  passID,
+		Step:    "consolidation",
+		Policy:  sleep.PolicyApproval,
+		Kind:    sleep.OpNearMeld,
+		Target:  "LORE-3<-LORE-4",
+		Applied: false,
+	}); err != nil {
+		t.Fatalf("sleep.RecordOp (approval): %v", err)
+	}
+	if err := sleep.EndPass(ctx, ldb, passID, started.Add(time.Minute)); err != nil {
+		t.Fatalf("sleep.EndPass: %v", err)
+	}
+}
+
+// sectionIndex returns the byte offset of marker in body, failing the
+// test when the marker is missing; position assertions read better
+// against named offsets than raw strings.Index plumbing.
+func sectionIndex(t *testing.T, body, marker string) int {
+	t.Helper()
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatalf("body missing %q; got:\n%s", marker, body)
+	}
+	return idx
+}
+
+// TestHandleSessionStart_SleepNarrationExactlyOnce asserts the
+// "while you slept" flow through the real handler: with an unnarrated
+// pass in the journal, the response carries one moon-prefixed line
+// summarizing the op counts, placed after the board-summary line and
+// before the briefing body; a second session_start consumes nothing
+// and shows no line.
+func TestHandleSessionStart_SleepNarrationExactlyOnce(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "sleep-narration-proj"
+	seedSessionBoard(t, ctx, pid)
+	seedSleepPass(t, ctx)
+
+	res, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleSessionStart returned IsError; content: %v", res.Content)
+	}
+	body := textOf(res.Content)
+
+	// One moon-prefixed line with the aggregated counts: the applied
+	// meld and the approval-gated proposal awaiting review.
+	for _, want := range []string{
+		"🌙 while you slept",
+		"melded 1 entry",
+		"1 op awaiting review",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q; got:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "🌙"); got != 1 {
+		t.Errorf("moon line appears %d times, want exactly 1; body:\n%s", got, body)
+	}
+
+	// Placement: after the board-summary line, before the briefing body.
+	boardIdx := sectionIndex(t, body, "📊 board:")
+	moonIdx := sectionIndex(t, body, "🌙 while you slept")
+	briefIdx := sectionIndex(t, body, "📋 last briefing")
+	if !(boardIdx < moonIdx && moonIdx < briefIdx) {
+		t.Errorf("sleep line out of position: board=%d moon=%d briefing=%d; body:\n%s",
+			boardIdx, moonIdx, briefIdx, body)
+	}
+
+	// Exactly-once: the pass is consumed, so the next session_start has
+	// nothing to narrate.
+	res2, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart (second): %v", err)
+	}
+	if body2 := textOf(res2.Content); strings.Contains(body2, "🌙") {
+		t.Errorf("second session_start still narrates; body:\n%s", body2)
+	}
+}
+
+// TestHandleSessionStart_SleepNarrationBriefOnly asserts brief_only
+// mode carries the narration too (it is the headline of the response,
+// not part of the trimmed board sections) placed after the header
+// (brief-only has no board line) and before the briefing, and consumed
+// exactly once just like the full path.
+func TestHandleSessionStart_SleepNarrationBriefOnly(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "sleep-brief-proj"
+	seedSessionBoard(t, ctx, pid)
+	seedSleepPass(t, ctx)
+
+	res, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: true})
+	if err != nil {
+		t.Fatalf("handleSessionStart (brief_only): %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("brief_only call returned IsError; content: %v", res.Content)
+	}
+	body := textOf(res.Content)
+
+	if !strings.Contains(body, "🌙 while you slept") {
+		t.Fatalf("brief_only body missing sleep narration; got:\n%s", body)
+	}
+	headerIdx := sectionIndex(t, body, "📍 active project:")
+	moonIdx := sectionIndex(t, body, "🌙 while you slept")
+	briefIdx := sectionIndex(t, body, "📋 last briefing")
+	if !(headerIdx < moonIdx && moonIdx < briefIdx) {
+		t.Errorf("sleep line out of position: header=%d moon=%d briefing=%d; body:\n%s",
+			headerIdx, moonIdx, briefIdx, body)
+	}
+	// The brief-only trims still hold around the new line.
+	if strings.Contains(body, "📊 board:") {
+		t.Errorf("brief_only body must not contain the board line; got:\n%s", body)
+	}
+
+	res2, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: true})
+	if err != nil {
+		t.Fatalf("handleSessionStart (second brief_only): %v", err)
+	}
+	if body2 := textOf(res2.Content); strings.Contains(body2, "🌙") {
+		t.Errorf("second brief_only session_start still narrates; body:\n%s", body2)
+	}
+}
+
+// TestHandleSessionStart_SleepJournalEmptyOrAbsent is the
+// graceful-degradation guard: with an empty journal the response is
+// byte-identical to a render with narration stubbed out entirely (the
+// pre-narration output), and a journal-less lore DB (pre-migration
+// shape) degrades the same way: no line, no error.
+func TestHandleSessionStart_SleepJournalEmptyOrAbsent(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "sleep-degrade-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	call := func(label string) string {
+		t.Helper()
+		res, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+		if err != nil {
+			t.Fatalf("handleSessionStart (%s): %v", label, err)
+		}
+		if res.IsError {
+			t.Fatalf("handleSessionStart (%s) returned IsError; content: %v", label, res.Content)
+		}
+		return textOf(res.Content)
+	}
+
+	// Empty journal (migrated DB, no passes): live narration path.
+	emptyBody := call("empty journal")
+
+	// Stub narration off entirely to capture the pre-narration render.
+	saved := sleepNarration
+	t.Cleanup(func() { sleepNarration = saved })
+	sleepNarration = func(context.Context) string { return "" }
+	stubbedBody := call("narration stubbed")
+	sleepNarration = saved
+
+	if emptyBody != stubbedBody {
+		t.Errorf("empty-journal body differs from narration-free render:\nlive:\n%s\nstubbed:\n%s",
+			emptyBody, stubbedBody)
+	}
+
+	// Journal-less DB: drop the sleep tables to simulate a lore DB from
+	// before the journal migration. The migration runner won't re-create
+	// them (the schema version is already recorded), so the narration
+	// read hits "no such table" and must swallow it.
+	ldb, err := openLoreDB(ctx)
+	if err != nil {
+		t.Fatalf("open lore db: %v", err)
+	}
+	for _, stmt := range []string{`DROP TABLE sleep_ops`, `DROP TABLE sleep_passes`} {
+		if _, err := ldb.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = ldb.Close()
+
+	droppedBody := call("journal-less DB")
+	if droppedBody != emptyBody {
+		t.Errorf("journal-less body differs from empty-journal body:\nempty:\n%s\ndropped:\n%s",
+			emptyBody, droppedBody)
+	}
+	if strings.Contains(droppedBody, "🌙") {
+		t.Errorf("journal-less body must not narrate; got:\n%s", droppedBody)
 	}
 }
