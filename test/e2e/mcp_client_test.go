@@ -99,13 +99,24 @@ type toolResult struct {
 func (c *container) openSession(ctx context.Context, t *testing.T) *mcpSession {
 	t.Helper()
 
-	//nolint:gosec // argv is harness-controlled
-	cmd := exec.CommandContext(ctx, "docker",
+	args := []string{
 		"exec", "-i",
 		"-w", projectDir,
 		"-e", "GUILD_NO_UPDATE_CHECK=1",
-		c.name, "guild", "mcp", "serve",
-	)
+	}
+	// Direct mode is the no-daemon, in-process path: pin GUILD_NO_DAEMON=1
+	// so `guild mcp serve` never autostarts a daemon (autostart is on by
+	// default). This keeps direct mode the byte-identical no-daemon
+	// baseline the golden transcripts encode. Daemon mode (when it starts
+	// a daemon inside the container) deliberately omits the opt-out so the
+	// shim pipes through the daemon and the same goldens still hold.
+	if suite.mode != modeDaemon {
+		args = append(args, "-e", "GUILD_NO_DAEMON=1")
+	}
+	args = append(args, c.name, "guild", "mcp", "serve")
+
+	//nolint:gosec // argv is harness-controlled
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("mcp session stdin: %v", err)

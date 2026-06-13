@@ -4,7 +4,7 @@
 //  1. Built-in defaults (this file)
 //  2. ~/.guild/config.toml      (user-wide)
 //  3. <repo>/.guild/config.toml (per-project overrides)
-//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI)
+//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON)
 //  5. CLI flags                  (via pflag.FlagSet)
 package config
 
@@ -68,6 +68,18 @@ type TelemetryConfig struct {
 	UsageLog bool `toml:"usage_log"`
 }
 
+// DaemonConfig controls the optional background daemon.
+type DaemonConfig struct {
+	// Autostart lets the first MCP shim that finds no running daemon
+	// spawn one (under a lock so concurrent shims elect a single
+	// spawner). On by default so the background daemon is available
+	// without an explicit start; set false in [daemon] config, or pass
+	// GUILD_NO_DAEMON=1 / --no-daemon, to keep the no-daemon path. With
+	// it off the shim never spawns and the process behaves exactly as a
+	// build without daemon support: probe-and-fall-through only.
+	Autostart bool `toml:"autostart"`
+}
+
 // Config is the merged, validated configuration for a guild process.
 // All fields are safe to read after Load returns; nil pointer dereferences
 // cannot happen because Load always fills in defaults before returning.
@@ -89,6 +101,7 @@ type Config struct {
 	Scoring   ScoringConfig   `toml:"scoring"`
 	Inscribe  InscribeConfig  `toml:"inscribe"`
 	Telemetry TelemetryConfig `toml:"telemetry"`
+	Daemon    DaemonConfig    `toml:"daemon"`
 }
 
 // defaults returns a Config populated with the built-in baseline values.
@@ -120,6 +133,13 @@ func defaults() Config {
 		},
 		Telemetry: TelemetryConfig{
 			UsageLog: false,
+		},
+		Daemon: DaemonConfig{
+			// On from day one: the first shim spawns the daemon when
+			// none is running (ollama pattern). GUILD_NO_DAEMON=1, the
+			// --no-daemon flag, or [daemon] autostart = false opt out and
+			// restore the byte-identical no-daemon path.
+			Autostart: true,
 		},
 	}
 }

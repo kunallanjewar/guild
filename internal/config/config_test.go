@@ -724,3 +724,144 @@ func TestLoadValidDaysLayerPrecedence(t *testing.T) {
 		t.Errorf("principle (untouched default=0): got %d", got)
 	}
 }
+
+// ---- unit: daemon.autostart ------------------------------------------------
+
+func TestDefaultsDaemonAutostart(t *testing.T) {
+	if !defaults().Daemon.Autostart {
+		t.Error("daemon.autostart default: got false, want true (autostart is on from day one)")
+	}
+}
+
+func TestFileLayerDaemonAutostartFalse(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(p, []byte("[daemon]\nautostart = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Daemon.Autostart {
+		t.Error("[daemon] autostart = false should turn autostart off")
+	}
+}
+
+func TestFileLayerDaemonAutostartAbsentKeepsLowerLayer(t *testing.T) {
+	// A file with no [daemon] table must not clobber the default-true
+	// value (per-key merge, same as every other knob).
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(p, []byte("[scoring]\nw_fts = 0.5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if !cfg.Daemon.Autostart {
+		t.Error("autostart should remain default-true when the file omits [daemon]")
+	}
+}
+
+func TestEnvLayerGUILD_NO_DAEMON(t *testing.T) {
+	t.Setenv("GUILD_NO_DAEMON", "1")
+	cfg := defaults()
+	envLayer(&cfg)
+	if cfg.Daemon.Autostart {
+		t.Error("GUILD_NO_DAEMON=1: autostart should be false")
+	}
+}
+
+func TestEnvLayerGUILD_NO_DAEMON_Empty(t *testing.T) {
+	t.Setenv("GUILD_NO_DAEMON", "")
+	cfg := defaults()
+	envLayer(&cfg)
+	if !cfg.Daemon.Autostart {
+		t.Error("empty GUILD_NO_DAEMON: autostart should remain default-true")
+	}
+}
+
+func TestFlagLayerNoDaemonFlag(t *testing.T) {
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	fs.Bool("no-daemon", false, "disable daemon autostart")
+	if err := fs.Parse([]string{"--no-daemon"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	flagLayer(fs, &cfg)
+	if cfg.Daemon.Autostart {
+		t.Error("--no-daemon: autostart should be false")
+	}
+}
+
+func TestFlagLayerNoDaemonFlagUnsetKeepsLowerLayer(t *testing.T) {
+	// The flag is registered but not passed: it must not turn off an
+	// autostart the lower layers left on.
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	fs.Bool("no-daemon", false, "disable daemon autostart")
+	if err := fs.Parse([]string{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	flagLayer(fs, &cfg)
+	if !cfg.Daemon.Autostart {
+		t.Error("unset --no-daemon must leave autostart at the lower-layer value (true)")
+	}
+}
+
+// TestLoadDaemonAutostartLayerPrecedence walks autostart through every
+// layer: default-true, a user file flips it off, a repo file flips it
+// back on, and finally GUILD_NO_DAEMON wins as the highest opt-out.
+func TestLoadDaemonAutostartLayerPrecedence(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+
+	userGuildDir := filepath.Join(home, ".guild")
+	if err := os.MkdirAll(userGuildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Layer 2: user file turns autostart OFF.
+	if err := os.WriteFile(filepath.Join(userGuildDir, "config.toml"),
+		[]byte("[daemon]\nautostart = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Layer 3: repo file turns it back ON (beats the user layer).
+	writeTOML(t, repo, "[daemon]\nautostart = true\n")
+
+	t.Setenv("HOME", home)
+	t.Setenv("GUILD_PROJECT", "")
+	t.Setenv("GUILD_NO_USAGE_LOG", "")
+	t.Setenv("GUILD_NO_EMOJI", "")
+	t.Setenv("GUILD_NO_DAEMON", "")
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	// Without the env opt-out, the repo layer (true) wins over user (false).
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Daemon.Autostart {
+		t.Error("repo autostart=true should beat user autostart=false")
+	}
+
+	// Env opt-out is the highest layer reachable with nil flags: it
+	// forces autostart off regardless of either file.
+	t.Setenv("GUILD_NO_DAEMON", "1")
+	cfg, err = Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Daemon.Autostart {
+		t.Error("GUILD_NO_DAEMON=1 must force autostart off over any file layer")
+	}
+}
