@@ -55,10 +55,10 @@ type ReapResult struct {
 // behind it, the daemon reaper's per-sweep body. For each expired lease it
 // applies three guards before acting:
 //
-//	(a) session liveness — if isLive reports the lease's session is still
+//	(a) session liveness: if isLive reports the lease's session is still
 //	    registered, this is a missed heartbeat under load, not a crash; the
 //	    lease is left for the heartbeat tick to renew and nothing is touched.
-//	(b) claim identity — the task_status row must still be in_progress AND
+//	(b) claim identity: the task_status row must still be in_progress AND
 //	    claimed_by must still equal the lease holder. A claim that was
 //	    re-assigned, fulfilled, or forfeited since the lease was written no
 //	    longer matches; its stale lease row is deleted (orphan cleanup) but
