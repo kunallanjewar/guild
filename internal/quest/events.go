@@ -15,6 +15,12 @@ const (
 	NotePrefixRework      = "[rework] of: "
 	NotePrefixCheckpoint  = "[checkpoint] "
 	NotePrefixCompleted   = "[completed] "
+	// NotePrefixRenewal marks a quest as the renewal quest for one lore
+	// entry ("[renewal] entry: ENTRY-N"). PostRenewals writes it in the
+	// same transaction as the post and its dedupe scan matches the full
+	// note byte-for-byte, so an open quest carrying the marker blocks a
+	// second renewal post for the same entry.
+	NotePrefixRenewal = "[renewal] entry: "
 )
 
 // Event kinds — the enum column `event` in task_events. Writers (Post,
@@ -43,6 +49,7 @@ func IsSystemNote(note string) bool {
 		NotePrefixRework,
 		NotePrefixCheckpoint,
 		NotePrefixCompleted,
+		NotePrefixRenewal,
 	} {
 		if strings.HasPrefix(note, p) {
 			return true
