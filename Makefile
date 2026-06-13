@@ -390,10 +390,10 @@ docker-test: docker-build ## Build then smoke-test the image: --version, init, i
 GUILD_E2E_IMAGE ?= $(DOCKER_IMAGE):$(DOCKER_TAG)
 
 # GUILD_E2E_MODE selects the server process model inside the container.
-# "direct" (default) spawns `guild mcp serve` per session. "daemon" is a
-# documented no-op hook until the guild daemon ships; it runs identical
-# scenarios against the same golden transcripts so daemon-up vs
-# daemon-down can later be asserted byte-identical.
+# "direct" (default) spawns `guild mcp serve` per session. "daemon" starts
+# an in-container daemon and routes every session through the shim, running
+# the identical scenarios against the same golden transcripts so daemon-up
+# and daemon-down are asserted byte-identical.
 GUILD_E2E_MODE ?= direct
 
 .PHONY: e2e

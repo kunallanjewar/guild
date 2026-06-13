@@ -783,6 +783,84 @@ func TestEnvLayerGUILD_NO_DAEMON_Empty(t *testing.T) {
 	}
 }
 
+// ---- unit: daemon watch knobs ---------------------------------------------
+
+func TestDefaultsDaemonWatch(t *testing.T) {
+	d := defaults().Daemon
+	if !d.Watch {
+		t.Error("daemon.watch default: got false, want true (watch is on from day one)")
+	}
+	if d.RenewalCapPerPass != 3 {
+		t.Errorf("daemon.renewal_cap_per_pass default: got %d want 3", d.RenewalCapPerPass)
+	}
+	if d.WatchDebounceMS != 0 {
+		t.Errorf("daemon.watch_debounce_ms default: got %d want 0 (watcher built-in default)", d.WatchDebounceMS)
+	}
+}
+
+func TestFileLayerDaemonWatchKnobs(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	body := "[daemon]\nwatch = false\nrenewal_cap_per_pass = 7\nwatch_debounce_ms = 500\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Daemon.Watch {
+		t.Error("[daemon] watch = false should turn the watcher off")
+	}
+	if cfg.Daemon.RenewalCapPerPass != 7 {
+		t.Errorf("renewal_cap_per_pass: got %d want 7", cfg.Daemon.RenewalCapPerPass)
+	}
+	if cfg.Daemon.WatchDebounceMS != 500 {
+		t.Errorf("watch_debounce_ms: got %d want 500", cfg.Daemon.WatchDebounceMS)
+	}
+}
+
+func TestFileLayerDaemonWatchPartialKeepsLowerLayer(t *testing.T) {
+	// Only watch declared: the cap and debounce must keep their defaults
+	// (per-key merge, same as every other knob).
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(p, []byte("[daemon]\nwatch = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Daemon.Watch {
+		t.Error("[daemon] watch = false should turn the watcher off")
+	}
+	if cfg.Daemon.RenewalCapPerPass != 3 {
+		t.Errorf("renewal_cap_per_pass should remain default 3, got %d", cfg.Daemon.RenewalCapPerPass)
+	}
+	if cfg.Daemon.Autostart != true {
+		t.Error("autostart should remain default-true when the file omits it")
+	}
+}
+
+func TestEnvLayerGUILD_NO_WATCH(t *testing.T) {
+	t.Setenv("GUILD_NO_WATCH", "1")
+	cfg := defaults()
+	envLayer(&cfg)
+	if cfg.Daemon.Watch {
+		t.Error("GUILD_NO_WATCH=1: daemon.watch should be false")
+	}
+}
+
+func TestEnvLayerGUILD_NO_WATCH_Empty(t *testing.T) {
+	t.Setenv("GUILD_NO_WATCH", "")
+	cfg := defaults()
+	envLayer(&cfg)
+	if !cfg.Daemon.Watch {
+		t.Error("empty GUILD_NO_WATCH: daemon.watch should remain default-true")
+	}
+}
+
 func TestFlagLayerNoDaemonFlag(t *testing.T) {
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	fs.Bool("no-daemon", false, "disable daemon autostart")

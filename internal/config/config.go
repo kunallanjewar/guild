@@ -104,6 +104,15 @@ func fileLayer(path string, dst *Config) error {
 	if md.IsDefined("daemon", "autostart") {
 		dst.Daemon.Autostart = tmp.Daemon.Autostart
 	}
+	if md.IsDefined("daemon", "watch") {
+		dst.Daemon.Watch = tmp.Daemon.Watch
+	}
+	if md.IsDefined("daemon", "renewal_cap_per_pass") {
+		dst.Daemon.RenewalCapPerPass = tmp.Daemon.RenewalCapPerPass
+	}
+	if md.IsDefined("daemon", "watch_debounce_ms") {
+		dst.Daemon.WatchDebounceMS = tmp.Daemon.WatchDebounceMS
+	}
 	if md.IsDefined("sleep", "enabled") {
 		dst.Sleep.Enabled = tmp.Sleep.Enabled
 	}
@@ -159,6 +168,9 @@ func mergeValidDays(path string, fromFile map[string]int, dst *Config) error {
 //     shim from dialing or spawning a daemon for this process)
 //   - GUILD_NO_SLEEP=1     → Config.Sleep.Enabled = false (the running daemon
 //     keeps serving but never fires an idle dream pass)
+//   - GUILD_NO_WATCH=1     → Config.Daemon.Watch = false (the running daemon
+//     keeps serving but never starts a project watcher; staleness falls back
+//     to the query-time check)
 func envLayer(dst *Config) {
 	if v := os.Getenv("GUILD_PROJECT"); v != "" {
 		dst.Project = v
@@ -175,6 +187,9 @@ func envLayer(dst *Config) {
 	}
 	if parseBoolEnv("GUILD_NO_SLEEP") {
 		dst.Sleep.Enabled = false
+	}
+	if parseBoolEnv("GUILD_NO_WATCH") {
+		dst.Daemon.Watch = false
 	}
 }
 

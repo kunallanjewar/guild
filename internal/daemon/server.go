@@ -80,6 +80,15 @@ type Config struct {
 	// that serves but never dreams (the minimal Phase 1 behavior).
 	Scheduler *Scheduler
 
+	// Pipeline is the watch -> staleness -> renewal pipeline (ADR-005
+	// Phase 4). When non-nil, Run drives its watcher loop for the daemon's
+	// lifetime so file/git activity under registered project roots becomes
+	// lore staleness signals and renewal quests. Nil (or a disabled
+	// Pipeline) means a daemon that never watches; staleness then falls
+	// back to the query-time check, byte-identical to the no-daemon path.
+	// Its counters are surfaced on the status line.
+	Pipeline *Pipeline
+
 	// Logger receives the daemon's structured stderr log lines. Nil
 	// falls back to slog.Default(). Never log to stdout: the daemon
 	// owns no protocol stream on stdout, and keeping it silent leaves
@@ -209,6 +218,20 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
+	// ── watch -> staleness -> renewal pipeline (ADR-005 Phase 4) ─────
+	// Shares connCtx so daemon shutdown cancels the watcher loop (and
+	// closes its OS watches) alongside the connections. A nil or disabled
+	// Pipeline keeps the daemon serving without ever watching; a watcher
+	// failure inside Run degrades to not-watching without taking the
+	// daemon down (see pipeline.go).
+	if s.cfg.Pipeline != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.cfg.Pipeline.Run(connCtx)
+		}()
+	}
+
 	acceptErr := make(chan error, 1)
 	go func() {
 		for {
@@ -321,6 +344,7 @@ func (s *Server) writeStatus(ctx context.Context, conn net.Conn) {
 		StartedAt:      s.startedAt,
 		ActiveSessions: int(s.active.Load()),
 		EmbedderState:  state,
+		Watch:          s.watchStatus(),
 	}
 	data, err := json.Marshal(st)
 	if err != nil {
@@ -340,6 +364,25 @@ func (s *Server) writeStatus(ctx context.Context, conn net.Conn) {
 func (s *Server) touch() {
 	if s.cfg.Scheduler != nil {
 		s.cfg.Scheduler.Touch()
+	}
+}
+
+// watchStatus maps the wired Pipeline's snapshot onto the status wire
+// shape. A nil Pipeline (or one never started) reports a disabled watcher
+// with zero counters, so the status line is always populated.
+func (s *Server) watchStatus() WatchStatus {
+	if s.cfg.Pipeline == nil {
+		return WatchStatus{}
+	}
+	ps := s.cfg.Pipeline.Status()
+	return WatchStatus{
+		Enabled:         ps.Enabled,
+		Watching:        ps.Watching,
+		ProjectsWatched: ps.ProjectsWatched,
+		EventsSeen:      ps.EventsSeen,
+		SignalsRecorded: ps.SignalsRecorded,
+		QuestsPosted:    ps.QuestsPosted,
+		LastError:       ps.LastError,
 	}
 }
 
