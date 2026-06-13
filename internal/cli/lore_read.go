@@ -536,30 +536,15 @@ func sortStrings(s []string) {
 	}
 }
 
-// init registers every read subcommand under the existing loreCmd.
+// init registers the lore read subcommands that keep a bespoke cobra
+// implementation (appraise/study carry CLI-only hook-mode flags the
+// registry spec does not). The registry-generated lore verbs are bound by
+// the module-registry loop (bindModuleVerbs in modules.go).
 func init() {
 	loreCmd.AddCommand(
 		newAppraiseCmd(),
 		newStudyCmd(),
 	)
-	// Registry-migrated lore read verbs. See accompanying specs in
-	// internal/lore/<verb>_cmd.go.
-	deps := buildCLILoreDeps()
-	bindLoreRegistryVerb(loreCmd, lore.OathCommand, deps, "lore oath")
-	bindLoreRegistryVerb(loreCmd, lore.DossierCommand, deps, "lore dossier")
-	bindLoreRegistryVerb(loreCmd, lore.EchoesCommand, deps, "lore echoes")
-	bindLoreRegistryVerb(loreCmd, lore.WhispersCommand, deps, "lore whispers")
-	bindLoreRegistryVerb(loreCmd, lore.ListCommand, deps, "lore list")
-	bindLoreRegistryVerb(loreCmd, lore.RipplesCommand, deps, "lore ripples")
-}
-
-// bindLoreRegistryVerb is the lore-side sibling of bindRegistryVerb in
-// quest.go. Attaches a Command spec and wraps telemetry under the
-// "lore <verb>" subcommand label.
-func bindLoreRegistryVerb[I, O any](parent *cobra.Command, spec *command.Command[I, O], deps command.Deps, telemetryLabel string) {
-	spec.BindCobra(parent, deps)
-	wrapTelemetry(parent, spec.CLIPath[len(spec.CLIPath)-1], telemetryLabel)
-	cliRegistryBoundVerbs = append(cliRegistryBoundVerbs, spec.Name)
 }
 
 // buildCLILoreDeps mirrors buildCLICommandDeps but opens lore.db.

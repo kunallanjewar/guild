@@ -1,0 +1,90 @@
+package cli
+
+import (
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/mathomhaus/guild/internal/command"
+	"github.com/mathomhaus/guild/internal/module"
+	_ "github.com/mathomhaus/guild/internal/modules" // activate core modules (quest/lore/session) in the registry
+)
+
+// bindModuleVerbs is the ADR-006 Phase 2 CLI cutover: it replaces the
+// per-file hand lists of bindRegistryVerb / bindLoreRegistryVerb calls
+// (quest.go, lore_read.go, lore_write.go, lore_health.go) with one loop over
+// the module registry. For each enabled module it resolves that module's
+// CLI-side Deps bundle (the loreDeps vs questDeps split is preserved, keyed
+// by module name) and binds every Command the module contributes onto the
+// matching cobra parent, then restores the per-verb telemetry wrap exactly
+// as the old helpers did.
+//
+// It is called once from the cli package's init() (modules_init.go's init
+// after questCmd/loreCmd exist). Command order is not observable: cobra sorts
+// subcommands in help output and the daemon-route parity tests diff verb
+// SETS, not order, so this loop is byte-identical to the old explicit lists.
+func bindModuleVerbs() {
+	for _, m := range module.Enabled(nil) {
+		deps, parent, ok := cliBindTargetForModule(m.Name())
+		if !ok {
+			// session contributes no CLI verbs; its bootstrap tools are MCP
+			// only and hand-wired. Skip rather than bind nil Commands.
+			continue
+		}
+		for _, cmd := range m.Commands() {
+			bindModuleVerb(parent, cmd, deps)
+		}
+	}
+}
+
+// cliBindTargetForModule returns the CLI Deps bundle and cobra parent a
+// module's verbs attach to, keyed by module name. ok=false means the module
+// contributes no CLI verbs through the loop (session).
+func cliBindTargetForModule(name string) (command.Deps, *cobra.Command, bool) {
+	switch name {
+	case "lore":
+		return buildCLILoreDeps(), loreCmd, true
+	case "quest":
+		return buildCLICommandDeps(), questCmd, true
+	default:
+		return command.Deps{}, nil, false
+	}
+}
+
+// cliBespokeVerbs are the registry tool names whose CLI surface is NOT bound
+// by the module loop. They fall into two groups, both byte-identical to the
+// pre-cutover wiring:
+//
+//   - lore_appraise / lore_study have hand-rolled cobra commands
+//     (newAppraiseCmd / newStudyCmd) with CLI-only hook-mode flags (--inject,
+//     --from-stdin-json, --query) that the registry spec does not carry, so
+//     the loop must not also register a colliding `lore appraise` subcommand.
+//     They remain registry tools on the MCP surface (bound by the MCP loop).
+//   - quest_clear is MCPOnly: it was never passed to bindRegistryVerb on the
+//     CLI before, so it never appeared in cliRegistryBoundVerbs. command.
+//     BindCobra would skip it anyway, but listing it here keeps it out of the
+//     CLI-bound tracking slice exactly as before.
+var cliBespokeVerbs = map[string]bool{
+	"lore_appraise": true,
+	"lore_study":    true,
+	"quest_clear":   true,
+}
+
+// bindModuleVerb attaches one registry spec to parent and restores the
+// telemetry wrap + the cliRegistryBoundVerbs tracking append, the same three
+// effects bindRegistryVerb / bindLoreRegistryVerb produced per verb. The
+// per-verb telemetry label is strings.Join(CobraPath, " "), which reproduces
+// every pre-cutover label exactly (e.g. quest_epic -> "quest campaign",
+// lore_health -> "lore health").
+func bindModuleVerb(parent *cobra.Command, spec command.Registrant, deps command.Deps) {
+	if cliBespokeVerbs[spec.WireName()] {
+		return
+	}
+	spec.BindCobra(parent, deps)
+	path := spec.CobraPath()
+	if len(path) == 0 {
+		return
+	}
+	wrapTelemetry(parent, path[len(path)-1], strings.Join(path, " "))
+	cliRegistryBoundVerbs = append(cliRegistryBoundVerbs, spec.WireName())
+}

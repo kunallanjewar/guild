@@ -187,7 +187,25 @@ func (d Deps) ResolveLoreValidDays() map[string]int {
 // Registrant is the erased-handle interface that lets a heterogeneous
 // set of Command[I, O] values share registration code. Command[I, O]
 // satisfies this via its BindCobra / BindMCP methods.
+//
+// WireName and CobraPath expose the two identifiers a type-erased caller
+// needs to wire a verb without recovering its concrete generic type: the
+// MCP tool name (for tracking / parity diffs) and the cobra tree path (for
+// deriving the per-verb telemetry label). They are accessors, not the
+// exported Name / CLIPath struct fields, because a method may not share a
+// name with a field on the same type. Added for the ADR-006 module-loop
+// CLI binder, which iterates []Registrant.
 type Registrant interface {
 	BindCobra(parent *cobra.Command, d Deps)
 	BindMCP(server *sdkmcp.Server, d Deps)
+	// WireName returns the MCP tool wire name (Command.Name).
+	WireName() string
+	// CobraPath returns the cobra tree path (Command.CLIPath).
+	CobraPath() []string
 }
+
+// WireName returns the command's MCP tool wire name (the Name field).
+func (c *Command[I, O]) WireName() string { return c.Name }
+
+// CobraPath returns the command's cobra tree path (the CLIPath field).
+func (c *Command[I, O]) CobraPath() []string { return c.CLIPath }
