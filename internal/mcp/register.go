@@ -80,6 +80,15 @@ func (c *serverCore) buildMCPCommandDeps() command.Deps {
 	if c.providers.questEmbed != nil {
 		d.Embed = c.providers.questEmbed
 	}
+	// Lease is the daemon's per-session quest-lease port (ADR-005 Phase
+	// 3): an accept under this session writes a lease, a mutating call
+	// renews it. Nil for the stdio and in-process paths, the
+	// byte-identical no-daemon contract. The field is `any` and only set
+	// when genuinely non-nil so a typed nil never defeats the
+	// leaseFromDeps nil-check (same care as Embed above).
+	if c.lease != nil {
+		d.Lease = c.lease
+	}
 	return d
 }
 

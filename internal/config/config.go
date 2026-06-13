@@ -113,6 +113,12 @@ func fileLayer(path string, dst *Config) error {
 	if md.IsDefined("daemon", "watch_debounce_ms") {
 		dst.Daemon.WatchDebounceMS = tmp.Daemon.WatchDebounceMS
 	}
+	if md.IsDefined("daemon", "lease_ttl") {
+		dst.Daemon.LeaseTTLSeconds = tmp.Daemon.LeaseTTLSeconds
+	}
+	if md.IsDefined("daemon", "heartbeat_interval") {
+		dst.Daemon.HeartbeatIntervalSeconds = tmp.Daemon.HeartbeatIntervalSeconds
+	}
 	if md.IsDefined("sleep", "enabled") {
 		dst.Sleep.Enabled = tmp.Sleep.Enabled
 	}
@@ -323,6 +329,20 @@ func Load(flags *pflag.FlagSet) (*Config, error) {
 	// persistence to TOML; NoUsageLog is the merged runtime bool).
 	if !cfg.Telemetry.UsageLog {
 		cfg.NoUsageLog = true
+	}
+
+	// A non-positive lease TTL or heartbeat interval is meaningless (a
+	// zero or negative window would expire every lease instantly), so a
+	// bad value silently falls back to the built-in default rather than
+	// failing the load: the daemon's liveness layer must not be disarmed
+	// by a typo in config.toml. Defaults are read from the same baseline
+	// every other layer applies deltas on top of.
+	base := defaults()
+	if cfg.Daemon.LeaseTTLSeconds <= 0 {
+		cfg.Daemon.LeaseTTLSeconds = base.Daemon.LeaseTTLSeconds
+	}
+	if cfg.Daemon.HeartbeatIntervalSeconds <= 0 {
+		cfg.Daemon.HeartbeatIntervalSeconds = base.Daemon.HeartbeatIntervalSeconds
 	}
 
 	return &cfg, nil

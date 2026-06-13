@@ -77,6 +77,13 @@ type serverCore struct {
 	// the daemon sets it to the shim's preamble cwd so concurrent
 	// sessions from different checkouts resolve independently.
 	cwd string
+
+	// lease is the per-session quest-lease port threaded onto
+	// command.Deps.Lease for this server's quest handlers (ADR-005 Phase
+	// 3). Nil for the stdio and in-process fallback paths (the
+	// byte-identical no-daemon contract); only the daemon sets it, bound
+	// to the connection's session identity.
+	lease any
 }
 
 // inferProject resolves the project from this server's connection cwd:
@@ -123,6 +130,17 @@ type Options struct {
 	// directory the agent is actually working in, not wherever the
 	// daemon happened to start.
 	CWD string
+
+	// Lease is the optional per-session quest-lease port (ADR-005 Phase
+	// 3), threaded onto command.Deps.Lease for the quest handlers. The
+	// daemon constructs one value per connection, bound to that session's
+	// identity, so an accept under the session writes a lease and a
+	// mutating call renews it. The field is `any` for the same reason
+	// command.Deps.Lease is: internal/mcp avoids forcing a quest type into
+	// the server-construction surface. Nil (the stdio and in-process
+	// fallback default) is the byte-identical no-daemon path: no lease row
+	// is ever written.
+	Lease any
 }
 
 // NewServer constructs a fully registered guild MCP server from opts.
@@ -165,7 +183,7 @@ func NewServer(opts Options) (*sdkmcp.Server, error) {
 
 	// Register all tools (bootstrap + always-on) against this server's
 	// core. See register.go.
-	registerAll(s, &serverCore{sessions: sessions, providers: providers, cwd: opts.CWD})
+	registerAll(s, &serverCore{sessions: sessions, providers: providers, cwd: opts.CWD, lease: opts.Lease})
 
 	return s, nil
 }

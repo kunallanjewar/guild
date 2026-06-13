@@ -31,18 +31,58 @@ import (
 type DaemonHost struct {
 	providers *Providers
 	logger    *slog.Logger
+
+	// registry is the daemon's session registry + lease-heartbeat tick
+	// (ADR-005 Phase 3). ServeSession registers each connection on it and
+	// wires the connection's per-session lease acquirer; the daemon Server
+	// drives registry.Run. leaseTTL is the resolved lease validity window
+	// the per-session acquirers and the heartbeat seam both bind, so a tick
+	// and an accept stamp the same expiry math.
+	registry *daemon.Registry
+	leaseTTL time.Duration
 }
 
 // Compile-time check: ServeSession satisfies the daemon package's
 // session-handler seam without an adapter.
 var _ daemon.SessionHandler = (*DaemonHost)(nil).ServeSession
 
-// NewDaemonHost constructs the shared bundle for one daemon process.
-// Call once per `guild daemon run`; pass ServeSession and
-// EmbedderState into daemon.Config.
+// NewDaemonHost constructs the shared bundle for one daemon process with
+// the default lease timings (built-in TTL and heartbeat interval). Call
+// once per `guild daemon run`; pass ServeSession and EmbedderState into
+// daemon.Config, and Registry() into daemon.Config.Registry.
 func NewDaemonHost() *DaemonHost {
-	return &DaemonHost{providers: NewProviders(), logger: newLogger()}
+	return NewDaemonHostWithLeases(defaultDaemonLeaseTTL, defaultDaemonHeartbeatInterval)
 }
+
+// NewDaemonHostWithLeases constructs the shared bundle with explicit lease
+// timings resolved from config. A non-positive value falls back to the
+// built-in default so a misconfigured daemon still heartbeats.
+func NewDaemonHostWithLeases(leaseTTL, heartbeatInterval time.Duration) *DaemonHost {
+	if leaseTTL <= 0 {
+		leaseTTL = defaultDaemonLeaseTTL
+	}
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = defaultDaemonHeartbeatInterval
+	}
+	h := &DaemonHost{
+		providers: NewProviders(),
+		logger:    newLogger(),
+		leaseTTL:  leaseTTL,
+	}
+	h.registry = daemon.NewRegistry(daemon.RegistryConfig{
+		HeartbeatInterval: heartbeatInterval,
+		LeaseTTL:          leaseTTL,
+		Renew:             h.renewLeasesSeam(),
+		BootGrace:         h.bootGraceSeam(),
+		Logger:            h.logger,
+	})
+	return h
+}
+
+// Registry exposes the host's session registry so cmd/guild can wire it
+// into daemon.Config.Registry. The daemon Server drives Registry.Run for
+// the daemon's lifetime.
+func (h *DaemonHost) Registry() *daemon.Registry { return h.registry }
 
 // Logger exposes the env-configured stderr logger (GUILD_MCP_LOG_FORMAT
 // / GUILD_MCP_LOG_LEVEL) so cmd/guild can hand the daemon listener the
@@ -87,11 +127,29 @@ func (h *DaemonHost) ServeSession(ctx context.Context, shim daemon.ShimPreamble,
 
 	instructions := resolveInstructionsFor(ctx, h.logger, store, shim.CWD)
 
+	// Session identity (ADR-005 Phase 3): the registry entry and every
+	// lease this session takes are keyed by the shim's pid, so the
+	// heartbeat tick refreshes exactly the rows this session's accepts
+	// wrote. Register on attach and unregister on detach (defer), so the
+	// registry snapshot tracks live connections and the tick stops
+	// heartbeating the moment the agent process (and its shim) dies. The
+	// resolved project is best-effort at attach time; the lease rows are
+	// the source of truth for what the session holds.
+	sessionID := daemonSessionID(shim.PID)
+	var lease any
+	if h.registry != nil {
+		proj := h.resolveSessionProject(ctx, store)
+		h.registry.Register(sessionID, proj, time.Now().UTC())
+		defer h.detachSession(ctx, sessionID)
+		lease = h.newLeaseAcquirer(ctx, sessionID)
+	}
+
 	srv, err := NewServer(Options{
 		Instructions: instructions,
 		Sessions:     store,
 		Providers:    h.providers,
 		CWD:          shim.CWD,
+		Lease:        lease,
 	})
 	if err != nil {
 		return fmt.Errorf("mcp: daemon session (shim pid %d): %w", shim.PID, err)

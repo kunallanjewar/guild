@@ -1086,3 +1086,113 @@ func TestLoadSleepEnabledLayerPrecedence(t *testing.T) {
 		t.Error("GUILD_NO_SLEEP=1 must force sleep off over any file layer")
 	}
 }
+
+// ---- unit: daemon lease heartbeat knobs ------------------------------------
+
+func TestDefaultsDaemonLeaseHeartbeat(t *testing.T) {
+	d := defaults().Daemon
+	if d.LeaseTTLSeconds != 600 {
+		t.Errorf("daemon.lease_ttl default: got %d want 600 (ten minutes)", d.LeaseTTLSeconds)
+	}
+	if d.HeartbeatIntervalSeconds != 30 {
+		t.Errorf("daemon.heartbeat_interval default: got %d want 30", d.HeartbeatIntervalSeconds)
+	}
+}
+
+func TestFileLayerDaemonLeaseHeartbeatKnobs(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	body := "[daemon]\nlease_ttl = 1200\nheartbeat_interval = 45\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Daemon.LeaseTTLSeconds != 1200 {
+		t.Errorf("lease_ttl: got %d want 1200", cfg.Daemon.LeaseTTLSeconds)
+	}
+	if cfg.Daemon.HeartbeatIntervalSeconds != 45 {
+		t.Errorf("heartbeat_interval: got %d want 45", cfg.Daemon.HeartbeatIntervalSeconds)
+	}
+}
+
+func TestFileLayerDaemonLeasePartialKeepsLowerLayer(t *testing.T) {
+	// Only lease_ttl declared: heartbeat_interval keeps its default
+	// (per-key merge, same as every other knob).
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(p, []byte("[daemon]\nlease_ttl = 900\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if cfg.Daemon.LeaseTTLSeconds != 900 {
+		t.Errorf("lease_ttl: got %d want 900", cfg.Daemon.LeaseTTLSeconds)
+	}
+	if cfg.Daemon.HeartbeatIntervalSeconds != 30 {
+		t.Errorf("heartbeat_interval should remain default 30, got %d", cfg.Daemon.HeartbeatIntervalSeconds)
+	}
+}
+
+// TestLoadDaemonLeaseInvalidFallsBackToDefault verifies that a
+// non-positive lease TTL or heartbeat interval in config silently falls
+// back to the built-in default instead of disarming the liveness layer.
+func TestLoadDaemonLeaseInvalidFallsBackToDefault(t *testing.T) {
+	home := t.TempDir()
+	userGuildDir := filepath.Join(home, ".guild")
+	if err := os.MkdirAll(userGuildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userGuildDir, "config.toml"),
+		[]byte("[daemon]\nlease_ttl = 0\nheartbeat_interval = -5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("GUILD_PROJECT", "")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	base := defaults()
+	if cfg.Daemon.LeaseTTLSeconds != base.Daemon.LeaseTTLSeconds {
+		t.Errorf("lease_ttl = 0 should fall back to default %d, got %d",
+			base.Daemon.LeaseTTLSeconds, cfg.Daemon.LeaseTTLSeconds)
+	}
+	if cfg.Daemon.HeartbeatIntervalSeconds != base.Daemon.HeartbeatIntervalSeconds {
+		t.Errorf("heartbeat_interval = -5 should fall back to default %d, got %d",
+			base.Daemon.HeartbeatIntervalSeconds, cfg.Daemon.HeartbeatIntervalSeconds)
+	}
+}
+
+// TestLoadDaemonLeaseValidPreserved verifies a valid positive override
+// survives the reconciliation pass in Load (the fallback only triggers on
+// non-positive values).
+func TestLoadDaemonLeaseValidPreserved(t *testing.T) {
+	home := t.TempDir()
+	userGuildDir := filepath.Join(home, ".guild")
+	if err := os.MkdirAll(userGuildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userGuildDir, "config.toml"),
+		[]byte("[daemon]\nlease_ttl = 300\nheartbeat_interval = 15\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("GUILD_PROJECT", "")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Daemon.LeaseTTLSeconds != 300 {
+		t.Errorf("lease_ttl = 300 should survive, got %d", cfg.Daemon.LeaseTTLSeconds)
+	}
+	if cfg.Daemon.HeartbeatIntervalSeconds != 15 {
+		t.Errorf("heartbeat_interval = 15 should survive, got %d", cfg.Daemon.HeartbeatIntervalSeconds)
+	}
+}

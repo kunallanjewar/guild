@@ -128,6 +128,23 @@ type DaemonConfig struct {
 	// (one second), which coalesces an editor's atomic-save burst into a
 	// single event.
 	WatchDebounceMS int `toml:"watch_debounce_ms"`
+
+	// LeaseTTLSeconds is how long a quest lease stays valid without a
+	// heartbeat. The daemon's renewal tick refreshes a live session's
+	// leases well inside this window; a crashed agent stops heartbeating
+	// and its lease lapses one TTL later, after which a reaper can forfeit
+	// the stale claim. Deliberately generous relative to the heartbeat
+	// interval so several missed ticks never expire a live session. Only
+	// the daemon reads it; the no-daemon path writes no lease rows.
+	// Non-positive falls back to the built-in default.
+	LeaseTTLSeconds int `toml:"lease_ttl"`
+
+	// HeartbeatIntervalSeconds is the cadence at which the daemon's
+	// renewal tick sweeps every live session and refreshes its leases.
+	// Kept well below LeaseTTLSeconds so a single missed beat never
+	// expires a live lease. Only the daemon reads it. Non-positive falls
+	// back to the built-in default.
+	HeartbeatIntervalSeconds int `toml:"heartbeat_interval"`
 }
 
 // Config is the merged, validated configuration for a guild process.
@@ -201,6 +218,14 @@ func defaults() Config {
 			Watch:             true,
 			RenewalCapPerPass: 3,
 			WatchDebounceMS:   0,
+			// Ten-minute lease TTL with a thirty-second heartbeat: the
+			// daemon refreshes a live session's leases every interval, so
+			// the TTL is deliberately generous (twenty heartbeats) and a
+			// burst of missed ticks under load never expires a live
+			// session. A crashed agent stops heartbeating and its lease
+			// lapses one TTL later for a reaper to forfeit.
+			LeaseTTLSeconds:          600,
+			HeartbeatIntervalSeconds: 30,
 		},
 		Sleep: SleepConfig{
 			// On by default for the same reason as daemon.autostart:
