@@ -118,6 +118,14 @@ type Adapter struct{}
 
 func init() { adapters.Register(Adapter{}) }
 
+// Compile-time guard: Adapter must expose Validate as a method so the
+// hooks-scan validator interface picks it up. Without this, the
+// dead-matcher check stays a package func and scan silently shows no
+// warnings.
+var _ interface {
+	Validate(adapters.Config) ([]string, error)
+} = Adapter{}
+
 // Name implements adapters.Adapter.
 func (Adapter) Name() string { return adapterName }
 
@@ -256,6 +264,14 @@ func Validate(cfg adapters.Config) (warnings []string, err error) {
 		}
 	}
 	return warnings, nil
+}
+
+// Validate as a method lets the adapter satisfy the read-only validator
+// interface that `guild hooks scan` type-asserts, so dead-matcher
+// warnings surface in the inventory without scan learning this harness
+// by name. It delegates to the package-level check.
+func (Adapter) Validate(cfg adapters.Config) (warnings []string, err error) {
+	return Validate(cfg)
 }
 
 // projectRoot resolves the directory whose .claude/settings.json

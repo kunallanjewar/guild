@@ -454,7 +454,10 @@ guild hooks scan: read-only inventory
 
 Reads each registered adapter's settings file and reports every hook
 found there, guild-owned and foreign alike. Foreign hooks are tagged so
-you can see what else manages this harness. Nothing is written.
+you can see what else manages this harness. Adapters that validate their
+harness's matcher vocabulary also flag dead matchers: values that parse
+but match none of the documented dispatch values, so the hook group can
+never fire. Nothing is written.
 
 Flags:
   --verbose  also report harnesses with no hooks installed
