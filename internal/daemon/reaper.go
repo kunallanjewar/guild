@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -95,6 +96,14 @@ type Reaper struct {
 	logger   *slog.Logger
 	clk      clock
 	interval time.Duration
+
+	// totalForfeited is the lifetime count of zombie claims this reaper has
+	// forfeited since the daemon started. Atomic because the sweep
+	// goroutine writes it while a status-request goroutine reads it through
+	// TotalForfeited. The daemon-status readout surfaces it so an operator
+	// can see at a glance how many crashed agents' claims the daemon has
+	// returned to the board.
+	totalForfeited atomic.Int64
 }
 
 // NewReaper validates cfg and returns a runnable Reaper.
@@ -159,12 +168,23 @@ func (r *Reaper) sweep(ctx context.Context) {
 		r.logger.Warn("daemon: lease reap sweep failed; will retry next tick", "err", err.Error())
 		return
 	}
+	if out.Forfeited > 0 {
+		r.totalForfeited.Add(int64(out.Forfeited))
+	}
 	if out.Forfeited > 0 || out.OrphansCleared > 0 {
 		r.logger.Info("daemon: lease reaper swept",
 			"scanned", out.Scanned,
 			"forfeited", out.Forfeited,
 			"skipped_live", out.SkippedLive,
 			"orphans_cleared", out.OrphansCleared,
+			"total_forfeited", r.totalForfeited.Load(),
 		)
 	}
+}
+
+// TotalForfeited returns the lifetime count of zombie claims this reaper has
+// forfeited since the daemon started. Safe for concurrent use: a
+// status-request goroutine reads it while the sweep goroutine writes it.
+func (r *Reaper) TotalForfeited() int64 {
+	return r.totalForfeited.Load()
 }

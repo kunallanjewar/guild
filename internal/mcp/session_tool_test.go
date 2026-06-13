@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/mathomhaus/guild/internal/daemon"
 	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
@@ -893,5 +894,168 @@ func TestHandleSessionStart_SleepJournalEmptyOrAbsent(t *testing.T) {
 	}
 	if strings.Contains(droppedBody, "🌙") {
 		t.Errorf("journal-less body must not narrate; got:\n%s", droppedBody)
+	}
+}
+
+// stubPresence is a PresenceSource that returns a fixed snapshot, so the
+// presence-line tests exercise the render path without a live registry.
+type stubPresence struct{ p daemon.Presence }
+
+func (s stubPresence) Presence() daemon.Presence { return s.p }
+
+// coreWithPresence builds the default test core with a presence source
+// wired, mirroring what NewServer does when the daemon supplies one.
+func coreWithPresence(p daemon.Presence) *serverCore {
+	c := newTestCore()
+	c.presence = stubPresence{p: p}
+	return c
+}
+
+// TestHandleSessionStart_NoPresenceSource_NoLine asserts the no-daemon path
+// (nil presence source) emits no presence line at all: not "0 agents", the
+// line is literally absent. This is the byte-identical no-daemon contract
+// the parity suite enforces.
+func TestHandleSessionStart_NoPresenceSource_NoLine(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "presence-absent-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	res, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart: %v", err)
+	}
+	body := textOf(res.Content)
+	if strings.Contains(body, "👥") {
+		t.Errorf("no-daemon body must not contain a presence line; got:\n%s", body)
+	}
+	if strings.Contains(body, "agent active") {
+		t.Errorf("no-daemon body must not contain presence text; got:\n%s", body)
+	}
+}
+
+// TestHandleSessionStart_PresenceLine_RendersAfterBoard asserts that with a
+// presence source wired (daemon path), exactly one presence line appears,
+// reporting the active-agent count, positioned directly after the board
+// summary and before the briefing body.
+func TestHandleSessionStart_PresenceLine_RendersAfterBoard(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "presence-present-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	res, _, err := coreWithPresence(daemon.Presence{Sessions: 2}).
+		handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart: %v", err)
+	}
+	body := textOf(res.Content)
+
+	const wantLine = "👥 2 agents active"
+	if strings.Count(body, "👥") != 1 {
+		t.Errorf("expected exactly one presence line; got:\n%s", body)
+	}
+	if !strings.Contains(body, wantLine) {
+		t.Errorf("body missing presence line %q; got:\n%s", wantLine, body)
+	}
+	// No leases held in this snapshot, so the on-lease clause is omitted.
+	if strings.Contains(body, "on lease") {
+		t.Errorf("presence line must omit the on-lease clause when no leases are held; got:\n%s", body)
+	}
+
+	// Position: presence line sits between the board summary and the briefing.
+	boardIdx := sectionIndex(t, body, "📊 board:")
+	presenceIdx := sectionIndex(t, body, "👥 ")
+	briefIdx := sectionIndex(t, body, "📋 last briefing")
+	if !(boardIdx < presenceIdx && presenceIdx < briefIdx) {
+		t.Errorf("presence line out of order: board=%d presence=%d brief=%d\n%s",
+			boardIdx, presenceIdx, briefIdx, body)
+	}
+}
+
+// TestHandleSessionStart_PresenceLine_OnLeaseClause asserts the on-lease
+// count renders when at least one session holds a lease, and the agent
+// noun singularizes for a lone agent.
+func TestHandleSessionStart_PresenceLine_OnLeaseClause(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "presence-lease-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	res, _, err := coreWithPresence(daemon.Presence{Sessions: 1, OnLease: 1}).
+		handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart: %v", err)
+	}
+	body := textOf(res.Content)
+
+	const wantLine = "👥 1 agent active, 1 on lease"
+	if !strings.Contains(body, wantLine) {
+		t.Errorf("body missing presence line %q; got:\n%s", wantLine, body)
+	}
+}
+
+// TestHandleSessionStart_PresenceSuppressedInBriefOnly asserts brief-only
+// mode (no board context) suppresses the presence line, mirroring the
+// board-summary suppression.
+func TestHandleSessionStart_PresenceSuppressedInBriefOnly(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "presence-briefonly-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	res, _, err := coreWithPresence(daemon.Presence{Sessions: 3}).
+		handleSessionStart(ctx, nil, sessionStartInput{Project: pid, BriefOnly: true})
+	if err != nil {
+		t.Fatalf("handleSessionStart (brief_only): %v", err)
+	}
+	body := textOf(res.Content)
+	if strings.Contains(body, "👥") {
+		t.Errorf("brief-only body must not contain a presence line; got:\n%s", body)
+	}
+}
+
+// TestHandleSessionStart_PresenceByteIdenticalSansLine is the unit-level
+// mirror of the parity suite's contract: stripping the single presence line
+// from the daemon-mode body yields exactly the no-daemon body. It proves the
+// presence line is the ONLY additive difference, so the parity allowlist
+// (which strips just that prefix) is sufficient.
+func TestHandleSessionStart_PresenceByteIdenticalSansLine(t *testing.T) {
+	isolateHome(t)
+	ctx := context.Background()
+
+	const pid = "presence-parity-proj"
+	seedSessionBoard(t, ctx, pid)
+
+	noDaemon, _, err := newTestCore().handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart (no daemon): %v", err)
+	}
+	daemonMode, _, err := coreWithPresence(daemon.Presence{Sessions: 2}).
+		handleSessionStart(ctx, nil, sessionStartInput{Project: pid})
+	if err != nil {
+		t.Fatalf("handleSessionStart (daemon): %v", err)
+	}
+
+	noDaemonBody := textOf(noDaemon.Content)
+	daemonBody := textOf(daemonMode.Content)
+
+	// Drop every presence line from the daemon body; the remainder must be
+	// byte-identical to the no-daemon body.
+	var rebuilt []string
+	for _, line := range strings.Split(daemonBody, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "👥 ") {
+			continue
+		}
+		rebuilt = append(rebuilt, line)
+	}
+	stripped := strings.Join(rebuilt, "\n")
+	if stripped != noDaemonBody {
+		t.Errorf("daemon body sans presence line differs from no-daemon body:\nno-daemon:\n%q\nstripped:\n%q",
+			noDaemonBody, stripped)
 	}
 }

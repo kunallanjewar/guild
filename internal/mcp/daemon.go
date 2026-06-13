@@ -99,6 +99,24 @@ func NewDaemonHostWithLeases(leaseTTL, heartbeatInterval, reapInterval time.Dura
 // the daemon's lifetime.
 func (h *DaemonHost) Registry() *daemon.Registry { return h.registry }
 
+// Compile-time check: *daemon.Registry satisfies PresenceSource, so a
+// daemon session can hand its registry to guild_session_start without an
+// adapter.
+var _ PresenceSource = (*daemon.Registry)(nil)
+
+// presenceSourceOrNil returns reg as a PresenceSource, or a true nil
+// interface when reg is a nil pointer. Assigning a typed-nil *Registry
+// straight into the interface field would make the nil check in
+// handleSessionStart see a non-nil PresenceSource and then call Presence on
+// a nil receiver (which reads a nil map). Returning an untyped nil keeps the
+// no-registry path on the byte-identical no-presence branch.
+func presenceSourceOrNil(reg *daemon.Registry) PresenceSource {
+	if reg == nil {
+		return nil
+	}
+	return reg
+}
+
 // Reaper exposes the host's lease reaper so cmd/guild can wire it into
 // daemon.Config.Reaper. The daemon Server drives Reaper.Run for the
 // daemon's lifetime.
@@ -181,6 +199,13 @@ func (h *DaemonHost) ServeSession(ctx context.Context, shim daemon.ShimPreamble,
 		Providers:    h.providers,
 		CWD:          shim.CWD,
 		Lease:        lease,
+		// Presence (ADR-005 Phase 3): the registry is this session's source
+		// for "who else is here", so guild_session_start can append the
+		// daemon-only "N agents active" line. A nil registry (a host wiring
+		// gap) leaves Presence nil, which is the byte-identical no-presence
+		// path; presenceSourceOrNil keeps a typed-nil registry from becoming
+		// a non-nil interface that would read a nil map.
+		Presence: presenceSourceOrNil(h.registry),
 	})
 	if err != nil {
 		return fmt.Errorf("mcp: daemon session (shim pid %d): %w", shim.PID, err)

@@ -172,7 +172,12 @@ func (h *DaemonHost) renewLeasesSeam() daemon.RenewFunc {
 }
 
 // renewLeasesForSession is the shared renewal body the tick and the detach
-// path both call: open quest.db, refresh every lease the session holds.
+// path both call: open quest.db, refresh every lease the session holds, and
+// reconcile the registry's in-memory held-quest view from the same handle so
+// the presence and daemon-status readouts stay current without a second
+// round-trip. The reconciliation is best-effort: a list failure leaves the
+// last-known held set in place and never fails the renewal, since the lease
+// refresh (the durability-critical half) already succeeded.
 func (h *DaemonHost) renewLeasesForSession(ctx context.Context, sessionID string) error {
 	db, err := openQuestDB(ctx)
 	if err != nil {
@@ -182,6 +187,15 @@ func (h *DaemonHost) renewLeasesForSession(ctx context.Context, sessionID string
 
 	if _, err := quest.RenewLeasesForSession(ctx, db, sessionID, time.Now().UTC(), h.leaseTTL); err != nil {
 		return fmt.Errorf("mcp: renew session leases: %w", err)
+	}
+
+	if h.registry != nil {
+		if held, lerr := quest.ListLeaseQuestsForSession(ctx, db, sessionID); lerr == nil {
+			h.registry.SetHeldQuests(sessionID, held)
+		} else {
+			h.logger.Warn("daemon: reconciling held-quest presence view failed; keeping last-known set",
+				"session", sessionID, "err", lerr.Error())
+		}
 	}
 	return nil
 }

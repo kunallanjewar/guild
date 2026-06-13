@@ -102,12 +102,63 @@ var parityScrubs = []parityScrub{
 	{regexp.MustCompile(`/[^\s"]*/\.guild/`), "<GUILD>/"},
 }
 
-// scrubParity applies every rule in order.
+// ──────────────── daemon-only additive-line allowlist ───────────────
+//
+// Phase 3 introduces the first intentional daemon-ONLY additive output: the
+// presence line in guild_session_start ("N agents active"), which exists
+// only when a session registry is live, i.e. only in arm B. A naive
+// byte-for-byte comparison would flag it as a divergence, so the suite
+// consciously normalizes it away before comparing: every line whose trimmed
+// text begins with an allowlisted prefix is dropped from BOTH arms' output.
+//
+// This is the deliberate amendment ADR-005 calls for, not a weakening: the
+// allowlist is a closed, documented set. In arm A (daemon-down) there is no
+// registry, so no presence line is ever emitted and the strip is a no-op,
+// which keeps the no-daemon byte-identity check strict. In arm B the one
+// daemon-only line is removed and EVERYTHING ELSE is still byte-compared, so
+// any other daemon-induced divergence (a stray extra line, a changed body)
+// still fails the gate. A future additive daemon-only line (for example a
+// "while you slept" narration) must register its prefix here CONSCIOUSLY
+// rather than slip past parity silently. TestParityAllowlistIsLoadBearing
+// guards that the presence line genuinely needs this carve-out: drop the
+// allowlist and the daemon-up transcript diverges.
+var daemonOnlyLinePrefixes = []string{
+	// guild_session_start presence line (ADR-005 Phase 3): emitted only
+	// when served inside a running daemon, sourced from the in-memory
+	// session registry. The 👥 prefix is the stable marker.
+	"👥 ",
+}
+
+// stripDaemonOnlyLines removes every line whose trimmed text begins with an
+// allowlisted daemon-only prefix. Applied as the final normalization step in
+// scrubParity so it runs on both arms; in the daemon-down arm no such line
+// exists, so it is a no-op.
+func stripDaemonOnlyLines(s string) string {
+	lines := strings.Split(s, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		drop := false
+		for _, prefix := range daemonOnlyLinePrefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// scrubParity applies every volatile-field rule in order, then strips the
+// allowlisted daemon-only additive lines.
 func scrubParity(s string) string {
 	for _, r := range parityScrubs {
 		s = r.re.ReplaceAllString(s, r.rep)
 	}
-	return s
+	return stripDaemonOnlyLines(s)
 }
 
 // ───────────────────────── recorded transcript ──────────────────────
@@ -634,6 +685,68 @@ func TestDaemonParity_MCP(t *testing.T) {
 	up := runMCPScenario(t, homeB, projB, nil)
 
 	compareTranscripts(t, "MCP parity", down, up)
+}
+
+// TestParityAllowlistIsLoadBearing proves the daemon-only allowlist carve-out
+// is doing real work: the presence line genuinely diverges the two arms, and
+// only the strip reconciles them. It guards two ways at once:
+//
+//   - WITHOUT the strip (volatile scrubs only) the daemon-up body (with the
+//     presence line) and the daemon-down body (without it) DIVERGE, so the
+//     carve-out is necessary, not cosmetic.
+//   - WITH the full scrubParity (which includes the strip) they MATCH, so the
+//     carve-out is sufficient and removing the presence prefix from the
+//     allowlist while the line still renders would reintroduce the failure.
+//
+// If a future change stops emitting the presence line, the "without strip"
+// arm stops diverging and this test fails, forcing the allowlist entry to be
+// retired alongside the line rather than lingering as dead normalization.
+func TestParityAllowlistIsLoadBearing(t *testing.T) {
+	const presencePrefix = "👥 "
+
+	// The presence line must be covered by the allowlist, or the carve-out
+	// it is supposed to prove does not exist.
+	covered := false
+	for _, p := range daemonOnlyLinePrefixes {
+		if p == presencePrefix {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Fatalf("presence prefix %q is not in daemonOnlyLinePrefixes; the carve-out is missing", presencePrefix)
+	}
+
+	// Two session_start bodies that differ ONLY by the daemon-only presence
+	// line, matching the real shape: header, board summary, then (daemon-up
+	// only) the presence line, then the briefing body.
+	const board = "📊 board: 1 oaths, 2 bounties, 0 echoes\n"
+	daemonDown := "📍 active project: parityproj\n" + board + "\n📋 last briefing: (none yet)\n"
+	daemonUp := "📍 active project: parityproj\n" + board + presencePrefix + "1 agent active\n" + "\n📋 last briefing: (none yet)\n"
+
+	// Volatile scrubs only (no strip): the bodies must diverge, proving the
+	// presence line is a real, unmasked difference between the arms.
+	downScrubbed := applyVolatileScrubs(daemonDown)
+	upScrubbed := applyVolatileScrubs(daemonUp)
+	if downScrubbed == upScrubbed {
+		t.Fatal("without the allowlist strip the two arms already match; the carve-out proves nothing (the presence line is not actually divergent)")
+	}
+
+	// Full scrub (volatile + strip): now they must match, proving the strip
+	// is exactly what reconciles the daemon-only line.
+	if got, want := scrubParity(daemonUp), scrubParity(daemonDown); got != want {
+		t.Fatalf("with the allowlist strip the arms still diverge:\n%s", unifiedDiff(want, got))
+	}
+}
+
+// applyVolatileScrubs runs only the volatile-field rules, deliberately
+// skipping the daemon-only-line strip, so a test can observe the pre-strip
+// divergence the allowlist exists to reconcile.
+func applyVolatileScrubs(s string) string {
+	for _, r := range parityScrubs {
+		s = r.re.ReplaceAllString(s, r.rep)
+	}
+	return s
 }
 
 // TestDaemonParity_CLI runs the representative CLI verb sequence in both
