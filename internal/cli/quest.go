@@ -150,38 +150,13 @@ func init() {
 	questCmd.AddCommand(
 		questInitCmd,
 	)
-	// Registry-generated verbs. Each BindCobra call produces the
-	// cobra.Command from the co-located spec (internal/quest/*_cmd.go)
-	// and attaches it under questCmd. wrapTelemetry restores per-call
-	// usage-log recording that the registry adapter doesn't do (surface
-	// concern, not verb concern). See docs/architecture/COMMAND_REGISTRY.md.
-	deps := buildCLICommandDeps()
-	bindRegistryVerb(questCmd, quest.AcceptCommand, deps, "quest accept")
-	bindRegistryVerb(questCmd, quest.FulfillCommand, deps, "quest fulfill")
-	bindRegistryVerb(questCmd, quest.ForfeitCommand, deps, "quest forfeit")
-	bindRegistryVerb(questCmd, quest.JournalCommand, deps, "quest journal")
-	bindRegistryVerb(questCmd, quest.BriefCommand, deps, "quest brief")
-	bindRegistryVerb(questCmd, quest.ActiveCommand, deps, "quest active")
-	bindRegistryVerb(questCmd, quest.SummonCommand, deps, "quest summon")
-	bindRegistryVerb(questCmd, quest.OrdersCommand, deps, "quest orders")
-	bindRegistryVerb(questCmd, quest.CampfireCommand, deps, "quest campfire")
-	bindRegistryVerb(questCmd, quest.EpicCommand, deps, "quest campaign")
-	bindRegistryVerb(questCmd, quest.PostCommand, deps, "quest post")
-	bindRegistryVerb(questCmd, quest.UpdateCommand, deps, "quest update")
-	bindRegistryVerb(questCmd, quest.ScrollCommand, deps, "quest scroll")
-	bindRegistryVerb(questCmd, quest.ListCommand, deps, "quest list")
-	bindRegistryVerb(questCmd, quest.GuildCommand, deps, "quest guild")
-	bindRegistryVerb(questCmd, quest.PulseCommand, deps, "quest pulse")
-	bindRegistryVerb(questCmd, quest.SearchCommand, deps, "quest search")
-}
-
-// bindRegistryVerb attaches a Command registry spec to parent and wraps
-// its RunE with telemetry. Helper collapses three lines per verb into
-// one so the init() stays scannable as the migration grows.
-func bindRegistryVerb[I, O any](parent *cobra.Command, spec *command.Command[I, O], deps command.Deps, telemetryLabel string) {
-	spec.BindCobra(parent, deps)
-	wrapTelemetry(parent, spec.CLIPath[len(spec.CLIPath)-1], telemetryLabel)
-	cliRegistryBoundVerbs = append(cliRegistryBoundVerbs, spec.Name)
+	// Registry-generated quest verbs are bound by the module-registry loop
+	// (bindModuleVerbs in modules.go), called from the package's final
+	// init() so questCmd's persistent flags above are already set and each
+	// verb inherits -p rather than declaring a colliding local one.
+	// wrapTelemetry restores per-call usage-log recording that the registry
+	// adapter doesn't do (surface concern, not verb concern). See
+	// docs/architecture/COMMAND_REGISTRY.md.
 }
 
 // wrapTelemetry decorates the named subcommand's RunE with a telemetry
