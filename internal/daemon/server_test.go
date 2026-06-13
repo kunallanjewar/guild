@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mathomhaus/guild/internal/daemon/testsupport"
 )
 
 // shortSocketPath and setHome live in discovery_test.go and are shared
@@ -45,24 +47,21 @@ func startDaemon(t *testing.T, ctx context.Context, srv *Server, socketPath stri
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Run(ctx) }()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatal("daemon did not become ready within 5s")
-		}
-		conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			if d, derr := ReadDiscovery(); derr == nil && d != nil {
-				return errCh
-			}
-		}
+	testsupport.WaitReady(t, "socket "+socketPath+" dialable and discovery written", func() bool {
 		select {
 		case runErr := <-errCh:
 			t.Fatalf("daemon exited during startup: %v", runErr)
-		case <-time.After(10 * time.Millisecond):
+		default:
 		}
-	}
+		conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		d, derr := ReadDiscovery()
+		return derr == nil && d != nil
+	})
+	return errCh
 }
 
 // requestStatus dials the daemon, sends a status-request preamble, and

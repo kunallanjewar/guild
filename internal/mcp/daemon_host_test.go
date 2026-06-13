@@ -20,6 +20,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/mathomhaus/guild/internal/daemon"
+	"github.com/mathomhaus/guild/internal/daemon/testsupport"
 )
 
 // daemonSocketPath returns a unix socket path in a short-named temp dir
@@ -67,18 +68,14 @@ func startHostedDaemon(t *testing.T, ctx context.Context, host *DaemonHost, sock
 		}
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testsupport.WaitReady(t, "socket "+sock+" dialable", func() bool {
 		conn, err := net.DialTimeout("unix", sock, 100*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return
+		if err != nil {
+			return false
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("daemon never became dialable: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		_ = conn.Close()
+		return true
+	})
 }
 
 // dialShimSession dials the daemon socket, sends a shim preamble, and

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mathomhaus/guild/internal/daemon"
+	"github.com/mathomhaus/guild/internal/daemon/testsupport"
 	"github.com/mathomhaus/guild/internal/storage"
 )
 
@@ -144,23 +145,21 @@ func startRouteDaemon(t *testing.T) *routeLogBuffer {
 		}
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatal("daemon did not become ready within 5s")
-		}
-		if conn, derr := net.DialTimeout("unix", sock, 100*time.Millisecond); derr == nil {
-			_ = conn.Close()
-			if d, rerr := daemon.ReadDiscovery(); rerr == nil && d != nil {
-				return logBuf
-			}
-		}
+	testsupport.WaitReady(t, "socket "+sock+" dialable and discovery written", func() bool {
 		select {
 		case runErr := <-errCh:
 			t.Fatalf("daemon exited during startup: %v", runErr)
-		case <-time.After(10 * time.Millisecond):
+		default:
 		}
-	}
+		conn, derr := net.DialTimeout("unix", sock, 100*time.Millisecond)
+		if derr != nil {
+			return false
+		}
+		_ = conn.Close()
+		d, rerr := daemon.ReadDiscovery()
+		return rerr == nil && d != nil
+	})
+	return logBuf
 }
 
 // stepOutput captures one CLI invocation's observable surface.
