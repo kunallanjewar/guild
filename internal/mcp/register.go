@@ -34,6 +34,12 @@ func loreValidDaysFromConfig() map[string]int {
 // NewServer instead, which routes the same registration with their
 // options. bootstrap → always-on; no deferred tier.
 func Register(s *sdkmcp.Server) {
+	// Reset the once-per-process sleep-autopass gate so each default
+	// server construction starts with a fresh gate, mirroring how the
+	// auto-backfill gate is reset for test-spawned servers. Production
+	// builds one server per process, so this runs once; tests that build
+	// several servers via Register each get a clean gate.
+	resetSleepAutopassState()
 	registerAll(s, &serverCore{
 		sessions:  processSessionStore{},
 		providers: newProcessProviders(),

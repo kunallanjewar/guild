@@ -219,6 +219,16 @@ func (c *serverCore) handleSessionStart(
 
 	full := header + "\n" + boardLine + sleepLine + "\n" + body
 	respBytes = uint(len(full))
+
+	// Degraded no-daemon fallback (ADR-005 Part 2): fire one bounded,
+	// once-per-process sleep autopass in the background. It is gated to a
+	// no-daemon process (a resident daemon owns the idle scheduler) and
+	// throttled against the journal, returns immediately, and never
+	// delays this response: the result is fully assembled above. When
+	// sleep is disabled or a daemon is up this is a no-op.
+	//nolint:contextcheck // the autopass goroutine is server-lifetime work and intentionally uses context.Background() internally, mirroring the auto-backfill trigger.
+	maybeTriggerSleepAutopass(c.providers.embed, newLogger())
+
 	return textResult(full), nil, nil
 }
 
