@@ -7,8 +7,8 @@ import (
 
 	"github.com/mathomhaus/guild/internal/command"
 	"github.com/mathomhaus/guild/internal/config"
-	"github.com/mathomhaus/guild/internal/lore"
-	"github.com/mathomhaus/guild/internal/quest"
+	"github.com/mathomhaus/guild/internal/module"
+	_ "github.com/mathomhaus/guild/internal/modules" // activate core modules (quest/lore/session) in the registry
 )
 
 // loreValidDaysFromConfig loads the merged config and returns the
@@ -132,55 +132,56 @@ func (c *serverCore) registerBootstrap(s *sdkmcp.Server) {
 }
 
 // registerAlwaysOn wires all guild tools. Full surface advertised at init.
+//
+// ADR-006 Phase 2 cutover: the ~40-line hand-maintained BindMCP list is
+// replaced by a loop over the module registry. For each enabled module the
+// kernel resolves that module's MCP-side Deps bundle (the loreDeps vs
+// quest/mcpDeps distinction is preserved, keyed by module name) and binds
+// every Command the module contributes. command.BindMCP skips CLIOnly specs
+// itself, so MCPOnly aliases like quest_clear still register and CLI-only
+// verbs do not. Tool order is not observable: the MCP SDK sorts tools/list
+// alphabetically, so the advertised surface is byte-identical regardless of
+// bind order.
+//
+// module.Enabled(nil) treats every registered module as enabled per its own
+// DefaultEnabled() — the Phase 2 default set (quest+lore+session). Config
+// drives Enabled in Phase 3.
 func (c *serverCore) registerAlwaysOn(s *sdkmcp.Server) {
-	// --- lore (read + write, common) ---
-	loreDeps := c.buildMCPLoreDeps()
-	lore.AppraiseCommand.BindMCP(s, loreDeps)
-	lore.StudyCommand.BindMCP(s, loreDeps)
-	lore.OathCommand.BindMCP(s, loreDeps)
-	lore.ListCommand.BindMCP(s, loreDeps)
-	lore.DossierCommand.BindMCP(s, loreDeps)
-	lore.InscribeCommand.BindMCP(s, loreDeps)
-	lore.ReforgeCommand.BindMCP(s, loreDeps)
-	lore.UpdateCommand.BindMCP(s, loreDeps)
-	lore.EchoesCommand.BindMCP(s, loreDeps)
-	lore.WhispersCommand.BindMCP(s, loreDeps)
-	lore.LinkCommand.BindMCP(s, loreDeps)    // provenance graph: write half
-	lore.UnlinkCommand.BindMCP(s, loreDeps)  // provenance graph: remove edge
-	lore.RipplesCommand.BindMCP(s, loreDeps) // provenance graph: read half
-	// --- lore (hygiene) ---
-	lore.InquestCommand.BindMCP(s, loreDeps)
-	lore.MeldCommand.BindMCP(s, loreDeps)
-	lore.CommuneCommand.BindMCP(s, loreDeps)
-	lore.SealCommand.BindMCP(s, loreDeps)
-	lore.CatalogCommand.BindMCP(s, loreDeps)
-	// --- lore (embedder health, Phase 1.6 ADR-003) ---
-	lore.EmbedderHealthCommand.BindMCP(s, loreDeps)
-	lore.EmbedRebuildCommand.BindMCP(s, loreDeps)
-	lore.CoverageReconcileCommand.BindMCP(s, loreDeps)
-	// --- quest (common flow) ---
-	mcpDeps := c.buildMCPCommandDeps()
-	quest.PostCommand.BindMCP(s, mcpDeps)
-	quest.UpdateCommand.BindMCP(s, mcpDeps)
-	quest.AcceptCommand.BindMCP(s, mcpDeps)
-	quest.JournalCommand.BindMCP(s, mcpDeps)
-	quest.CampfireCommand.BindMCP(s, mcpDeps)
-	quest.FulfillCommand.BindMCP(s, mcpDeps)
-	// quest_clear is kept as a backward-compat MCP alias (same handler,
-	// different tool name) so agents trained on the pre-QUEST-106 verb
-	// still work. Tool discovery surfaces both; new agents prefer fulfill.
-	quest.ClearCommand.BindMCP(s, mcpDeps)
-	quest.BriefCommand.BindMCP(s, mcpDeps)
-	quest.SummonCommand.BindMCP(s, mcpDeps)
-	quest.OrdersCommand.BindMCP(s, mcpDeps)
+	for _, m := range module.Enabled(nil) {
+		deps, ok := c.mcpDepsForModule(m.Name())
+		if !ok {
+			// A module with no MCP-side Deps bundle contributes no MCP
+			// tools through this loop (session today: its bootstrap tools
+			// are hand-wired in registerBootstrap). Skip it rather than
+			// bind its (possibly nil) Commands against an empty Deps.
+			continue
+		}
+		for _, cmd := range m.Commands() {
+			cmd.BindMCP(s, deps)
+		}
+	}
+
+	// quest_bounties is a hand-wired bootstrap-adjacent tool (not a
+	// command.Command), so it is registered outside the module loop. Its
+	// position does not affect the sorted tools/list surface.
 	c.registerQuestBounties(s)
-	quest.ListCommand.BindMCP(s, mcpDeps)
-	quest.ScrollCommand.BindMCP(s, mcpDeps)
-	quest.PulseCommand.BindMCP(s, mcpDeps)
-	quest.GuildCommand.BindMCP(s, mcpDeps)
-	quest.EpicCommand.BindMCP(s, mcpDeps)
-	quest.ActiveCommand.BindMCP(s, mcpDeps)
-	quest.ForfeitCommand.BindMCP(s, mcpDeps)
-	quest.SearchCommand.BindMCP(s, mcpDeps)
 	// archive/restore is CLI-only (QUEST-45) — see tools_guild.go comment.
+}
+
+// mcpDepsForModule returns the MCP-side command.Deps bundle a module's
+// Commands should bind with, keyed by module name. This preserves the
+// pre-cutover loreDeps vs quest/mcpDeps split: lore commands open lore.db
+// and wire RecordMiss + the lore embed provider; quest commands open
+// quest.db and wire OpenLoreDB + the quest embed provider + the daemon
+// lease port. ok=false means the module contributes no MCP tools (session),
+// so the caller skips it.
+func (c *serverCore) mcpDepsForModule(name string) (command.Deps, bool) {
+	switch name {
+	case "lore":
+		return c.buildMCPLoreDeps(), true
+	case "quest":
+		return c.buildMCPCommandDeps(), true
+	default:
+		return command.Deps{}, false
+	}
 }
