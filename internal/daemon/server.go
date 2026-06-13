@@ -89,6 +89,17 @@ type Config struct {
 	// Its counters are surfaced on the status line.
 	Pipeline *Pipeline
 
+	// Registry is the session registry + lease-heartbeat tick (ADR-005
+	// Phase 3). When non-nil, Run drives its tick for the daemon's
+	// lifetime: it renews every pre-existing lease once on boot, then
+	// heartbeats each live session's leases on the configured interval so
+	// a crashed agent's lease lapses while a live one never does. The
+	// session handler (the host's ServeSession) registers and unregisters
+	// each connection on it. Nil means a daemon that serves without ever
+	// heartbeating; leases then rely on their TTL alone, the same minimal
+	// behavior as a Phase 1 daemon.
+	Registry *Registry
+
 	// Logger receives the daemon's structured stderr log lines. Nil
 	// falls back to slog.Default(). Never log to stdout: the daemon
 	// owns no protocol stream on stdout, and keeping it silent leaves
@@ -229,6 +240,20 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			s.cfg.Pipeline.Run(connCtx)
+		}()
+	}
+
+	// ── session registry + lease-heartbeat tick (ADR-005 Phase 3) ────
+	// Shares connCtx so daemon shutdown cancels the tick alongside the
+	// connections. A nil Registry keeps the daemon serving without ever
+	// heartbeating; leases then rely on their TTL alone. The registry
+	// renews all pre-existing leases once on boot before any reaper could
+	// run, then heartbeats live sessions on its interval (see sessions.go).
+	if s.cfg.Registry != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.cfg.Registry.Run(connCtx)
 		}()
 	}
 

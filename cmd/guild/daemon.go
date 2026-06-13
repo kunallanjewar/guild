@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -48,16 +49,21 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// One host per daemon process: the shared provider bundle behind
-	// every session. The daemon server itself stays MCP-agnostic and
-	// receives the session handler as a seam.
-	host := mcp.NewDaemonHost()
+	// Resolve config once for every background loop: the [sleep] idle
+	// dream-pass scheduler, the [daemon] watch -> staleness -> renewal
+	// pipeline, and the [daemon] session registry + lease heartbeat. A
+	// config-load failure should not block the daemon from serving, so each
+	// builder degrades to a disabled loop with a warning and the host falls
+	// back to built-in lease timings.
+	cfg := loadDaemonConfig()
 
-	// Resolve config once for both background loops: the [sleep] idle
-	// dream-pass scheduler and the [daemon] watch -> staleness -> renewal
-	// pipeline. A config-load failure should not block the daemon from
-	// serving, so each builder degrades to a disabled loop with a warning.
-	cfg := loadDaemonConfig(host)
+	// One host per daemon process: the shared provider bundle behind every
+	// session, plus the session registry whose heartbeat tick refreshes
+	// live sessions' leases. The lease TTL and heartbeat interval come from
+	// config (built-in defaults when config failed to load). The daemon
+	// server itself stays MCP-agnostic and receives the session handler and
+	// registry as seams.
+	host := buildDaemonHost(cfg)
 
 	// Idle dream-pass scheduler (ADR-005 Phase 2): the host supplies the
 	// per-pass runner (WHAT a pass does); the scheduler decides WHEN.
@@ -79,7 +85,11 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		EmbedderState: host.EmbedderState,
 		Scheduler:     scheduler,
 		Pipeline:      pipeline,
-		Logger:        host.Logger(),
+		// Session registry + lease heartbeat (ADR-005 Phase 3): the host
+		// owns the registry (ServeSession registers each connection on it);
+		// the daemon Server drives its tick for the daemon's lifetime.
+		Registry: host.Registry(),
+		Logger:   host.Logger(),
 	})
 	if err != nil {
 		return fmt.Errorf("daemon run: %w", err)
@@ -94,15 +104,30 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 // loadDaemonConfig loads the merged config for the daemon's background
 // loops. Config load happens with nil flags (the daemon run command has
 // no sleep/watch flags); a load failure returns nil and the loop builders
-// fall back to disabled, so a bad config never blocks the daemon from
-// serving.
-func loadDaemonConfig(host *mcp.DaemonHost) *config.Config {
+// fall back to disabled (and the host to built-in lease timings), so a bad
+// config never blocks the daemon from serving. It runs before the host is
+// built, so a failure is logged to the package logger rather than the
+// host's.
+func loadDaemonConfig() *config.Config {
 	cfg, err := config.Load(nil)
 	if err != nil {
-		host.Logger().Warn("daemon: config load failed; idle dream passes and watcher disabled", "err", err.Error())
+		slog.Warn("daemon: config load failed; idle dream passes, watcher, and lease heartbeats use built-in defaults", "err", err.Error())
 		return nil
 	}
 	return cfg
+}
+
+// buildDaemonHost constructs the per-process MCP host with lease timings
+// resolved from config. A nil cfg (load failure) falls back to the host's
+// built-in default lease TTL and heartbeat interval.
+func buildDaemonHost(cfg *config.Config) *mcp.DaemonHost {
+	if cfg == nil {
+		return mcp.NewDaemonHost()
+	}
+	return mcp.NewDaemonHostWithLeases(
+		time.Duration(cfg.Daemon.LeaseTTLSeconds)*time.Second,
+		time.Duration(cfg.Daemon.HeartbeatIntervalSeconds)*time.Second,
+	)
 }
 
 // buildSleepScheduler returns the daemon's idle dream-pass scheduler from

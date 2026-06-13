@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -74,6 +75,24 @@ type LeaseAcquirer interface {
 	AcquireLease(ctx context.Context, projectID, taskID, holder string) error
 }
 
+// LeaseRenewer is the activity-renewal seam the mutating quest handlers
+// (journal, campfire, update, fulfill) call after a successful write
+// (ADR-005 Part 1, daemon Phase 3). When the calling session holds the
+// lease for the touched (project, quest), the write refreshes that
+// lease's heartbeat: cheap insurance against tick starvation under load,
+// and it re-arms the lease of a session that re-accepted work after a
+// daemon restart. A write that does not match a held lease is a no-op.
+//
+// command.Deps carries the implementation behind the same `any`-typed
+// Lease field as LeaseAcquirer (the daemon wires a value that satisfies
+// both), so the default nil seam is the no-daemon path: a mutating call
+// writes exactly today's rows and touches no task_leases row. Renewal is
+// best-effort: a failure is logged and never converts a committed write
+// into an API error.
+type LeaseRenewer interface {
+	RenewLeaseActivity(ctx context.Context, projectID, taskID string) error
+}
+
 // DBLeaseAcquirer is the *sql.DB-backed LeaseAcquirer the daemon wires
 // into command.Deps.Lease. SessionID is the daemon's per-session
 // identity (from the multi-session serving loop); the daemon constructs
@@ -109,6 +128,39 @@ func leaseFromDeps(d command.Deps) LeaseAcquirer {
 	return nil
 }
 
+// leaseRenewerFromDeps extracts the LeaseRenewer the daemon stashed into
+// command.Deps.Lease, the activity-renewal sibling of leaseFromDeps. A
+// nil return is the no-daemon path: the mutating handler skips renewal
+// entirely and stays byte-identical to today.
+func leaseRenewerFromDeps(d command.Deps) LeaseRenewer {
+	if d.Lease == nil {
+		return nil
+	}
+	if r, ok := d.Lease.(LeaseRenewer); ok {
+		return r
+	}
+	return nil
+}
+
+// renewLeaseActivity is the shared best-effort activity renewal the
+// mutating quest handlers call after a successful write. It is a no-op
+// when no daemon wired a renewer (the byte-identical no-daemon path) and
+// when the session does not hold the touched quest's lease; a renewal
+// error is logged, never surfaced, because the underlying write already
+// committed.
+func renewLeaseActivity(ctx context.Context, d command.Deps, projectID, taskID string) {
+	renewer := leaseRenewerFromDeps(d)
+	if renewer == nil {
+		return
+	}
+	if err := renewer.RenewLeaseActivity(ctx, projectID, taskID); err != nil {
+		slog.Warn("quest: activity lease renewal failed; write is durable",
+			"task_id", taskID,
+			"error", err,
+		)
+	}
+}
+
 // AcquireLease writes the lease row for a just-committed claim, binding
 // it to the acquirer's SessionID. It is the LeaseAcquirer implementation
 // the accept seam invokes.
@@ -122,6 +174,24 @@ func (a *DBLeaseAcquirer) AcquireLease(ctx context.Context, projectID, taskID, h
 		nowFn = func() time.Time { return time.Now().UTC() }
 	}
 	return AcquireLease(ctx, a.DB, projectID, taskID, a.SessionID, holder, nowFn().UTC(), ttl)
+}
+
+// RenewLeaseActivity refreshes the touched quest's lease when this
+// session holds it, the LeaseRenewer implementation the mutating quest
+// handlers invoke. It scopes the renewal to (project, task, session) so a
+// write to a quest some OTHER session leased never refreshes that other
+// session's lease, and a write to an unleased quest is a no-op.
+func (a *DBLeaseAcquirer) RenewLeaseActivity(ctx context.Context, projectID, taskID string) error {
+	ttl := a.TTL
+	if ttl <= 0 {
+		ttl = DefaultLeaseTTL
+	}
+	nowFn := a.Now
+	if nowFn == nil {
+		nowFn = func() time.Time { return time.Now().UTC() }
+	}
+	_, err := RenewLeaseForSessionTask(ctx, a.DB, a.SessionID, projectID, taskID, nowFn().UTC(), ttl)
+	return err
 }
 
 // AcquireLease records (or refreshes) the lease for taskID held by
@@ -198,6 +268,88 @@ func RenewLeasesForSession(ctx context.Context, db *sql.DB, sessionID string, no
 		affected, err = res.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("quest: renew leases: rows affected: %w", err)
+		}
+		return nil
+	})
+	return affected, err
+}
+
+// RenewLeaseForSessionTask pushes heartbeat_at to now and expires_at to
+// now+ttl for the single lease (projectID, taskID) when sessionID holds
+// it. It is the activity-renewal primitive: a mutating quest write
+// refreshes its own session's lease without disturbing any lease another
+// session holds. Returns the number of rows renewed (0 when the session
+// does not hold that quest's lease, or no lease exists for it).
+func RenewLeaseForSessionTask(ctx context.Context, db *sql.DB, sessionID, projectID, taskID string, now time.Time, ttl time.Duration) (int64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("quest: renew lease: nil db")
+	}
+	if sessionID = strings.TrimSpace(sessionID); sessionID == "" {
+		return 0, fmt.Errorf("quest: renew lease: empty session_id")
+	}
+	if projectID = strings.TrimSpace(projectID); projectID == "" {
+		return 0, fmt.Errorf("quest: renew lease: empty project_id")
+	}
+	taskID = strings.ToUpper(strings.TrimSpace(taskID))
+	if taskID == "" {
+		return 0, fmt.Errorf("quest: renew lease: empty task_id")
+	}
+	if ttl <= 0 {
+		ttl = DefaultLeaseTTL
+	}
+	nowStr := now.UTC().Format(time.RFC3339Nano)
+	expStr := now.UTC().Add(ttl).Format(time.RFC3339Nano)
+
+	var affected int64
+	err := withBusyRetry(func() error {
+		res, err := db.ExecContext(ctx,
+			`UPDATE task_leases
+			 SET heartbeat_at = ?, expires_at = ?
+			 WHERE session_id = ? AND project_id = ? AND task_id = ?`,
+			nowStr, expStr, sessionID, projectID, taskID,
+		)
+		if err != nil {
+			return fmt.Errorf("quest: renew lease: update: %w", err)
+		}
+		affected, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("quest: renew lease: rows affected: %w", err)
+		}
+		return nil
+	})
+	return affected, err
+}
+
+// RenewAllLeases pushes heartbeat_at to now and expires_at to now+ttl for
+// EVERY task_leases row, regardless of session. The daemon calls it once
+// on boot, before any expiry scan could run, so a lease left behind by a
+// crashed daemon gets one grace window in which its session can re-dial
+// and re-establish a heartbeat (ADR-005 hard invariant: a daemon crash
+// mid-session loses nothing). A session that fell back in-process holds no
+// connection to refresh its old lease; boot grace plus the generous TTL
+// bound the false-forfeit window. Returns the number of leases renewed.
+func RenewAllLeases(ctx context.Context, db *sql.DB, now time.Time, ttl time.Duration) (int64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("quest: renew all leases: nil db")
+	}
+	if ttl <= 0 {
+		ttl = DefaultLeaseTTL
+	}
+	nowStr := now.UTC().Format(time.RFC3339Nano)
+	expStr := now.UTC().Add(ttl).Format(time.RFC3339Nano)
+
+	var affected int64
+	err := withBusyRetry(func() error {
+		res, err := db.ExecContext(ctx,
+			`UPDATE task_leases SET heartbeat_at = ?, expires_at = ?`,
+			nowStr, expStr,
+		)
+		if err != nil {
+			return fmt.Errorf("quest: renew all leases: update: %w", err)
+		}
+		affected, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("quest: renew all leases: rows affected: %w", err)
 		}
 		return nil
 	})
