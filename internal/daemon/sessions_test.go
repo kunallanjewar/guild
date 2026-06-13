@@ -349,3 +349,59 @@ func TestRegistryTouchUpdatesLastHeartbeat(t *testing.T) {
 		t.Fatalf("LastHeartbeat = %v, want connect+5s", snap[0].LastHeartbeat)
 	}
 }
+
+// TestRegistrySetHeldQuests_PresenceAndSnapshot verifies the in-memory
+// held-quest view: SetHeldQuests records a session's leased quests (sorted,
+// copied so the caller cannot mutate registry state), the snapshot carries
+// them, Presence counts on-lease sessions, and a SetHeldQuests for an
+// unknown id is a no-op.
+func TestRegistrySetHeldQuests_PresenceAndSnapshot(t *testing.T) {
+	r, _ := newTestRegistry(t, RegistryConfig{})
+
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	r.Register("1001", "alpha", at)
+	r.Register("1002", "beta", at)
+
+	// Before any lease: zero on-lease.
+	if p := r.Presence(); p.Sessions != 2 || p.OnLease != 0 {
+		t.Fatalf("Presence before leases = %+v, want {2 0}", p)
+	}
+
+	// Pass an unsorted, caller-owned slice; the registry must copy + sort.
+	src := []string{"QUEST-7", "QUEST-1"}
+	r.SetHeldQuests("1001", src)
+	src[0] = "MUTATED" // mutation must not leak into the registry
+
+	r.SetHeldQuests("nope", []string{"QUEST-9"}) // no-op for unknown id
+
+	snap := r.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("snapshot len = %d, want 2", len(snap))
+	}
+	if got, want := snap[0].HeldQuests, []string{"QUEST-1", "QUEST-7"}; !equalStrings(got, want) {
+		t.Fatalf("session 1001 HeldQuests = %v, want sorted %v", got, want)
+	}
+	if !snap[0].OnLease() {
+		t.Errorf("session 1001 should report OnLease")
+	}
+	if snap[1].OnLease() {
+		t.Errorf("session 1002 holds no leases; OnLease must be false")
+	}
+
+	if p := r.Presence(); p.Sessions != 2 || p.OnLease != 1 {
+		t.Fatalf("Presence after one lease = %+v, want {2 1}", p)
+	}
+}
+
+// equalStrings is a tiny slice-equality helper for the held-quest assertions.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

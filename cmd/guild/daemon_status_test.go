@@ -105,6 +105,73 @@ func TestWriteDaemonStatusJSONIncludesWatch(t *testing.T) {
 	}
 }
 
+// TestWriteDaemonStatusJSONIncludesPresence proves the --json status view
+// carries the per-session presence detail and the lifetime reap counter when
+// the daemon is running, mapped through from the status reply.
+func TestWriteDaemonStatusJSONIncludesPresence(t *testing.T) {
+	connected := time.Unix(1_700_000_000, 0).UTC()
+	rep := daemon.StatusReport{
+		Running:     true,
+		SelfVersion: "v1.2.3",
+		SocketPath:  "/tmp/x/.guild/daemon.sock",
+		Status: daemon.Status{
+			PID:          4321,
+			Version:      "v1.2.3",
+			StartedAt:    connected,
+			LeasesReaped: 4,
+			Sessions: []daemon.SessionStatus{
+				{
+					ID:            "4242",
+					Project:       "alpha",
+					ConnectedAt:   connected,
+					LastHeartbeat: connected.Add(30 * time.Second),
+					HeldQuests:    []string{"QUEST-1"},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := writeDaemonStatusJSON(&buf, rep); err != nil {
+		t.Fatalf("writeDaemonStatusJSON: %v", err)
+	}
+
+	var view struct {
+		LeasesReaped int64               `json:"leases_reaped"`
+		Sessions     []daemonSessionView `json:"sessions"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &view); err != nil {
+		t.Fatalf("unmarshal status json: %v\n%s", err, buf.String())
+	}
+	if view.LeasesReaped != 4 {
+		t.Errorf("leases_reaped = %d, want 4: %s", view.LeasesReaped, buf.String())
+	}
+	if len(view.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1: %s", len(view.Sessions), buf.String())
+	}
+	s := view.Sessions[0]
+	if s.ID != "4242" || s.Project != "alpha" {
+		t.Errorf("session identity wrong: %+v", s)
+	}
+	if len(s.HeldQuests) != 1 || s.HeldQuests[0] != "QUEST-1" {
+		t.Errorf("held_quests not mapped through: %+v", s.HeldQuests)
+	}
+}
+
+// TestWriteDaemonStatusJSONOmitsSessionsWhenNotRunning proves a not-running
+// report keeps the JSON minimal: no sessions array.
+func TestWriteDaemonStatusJSONOmitsSessionsWhenNotRunning(t *testing.T) {
+	rep := daemon.StatusReport{Running: false, SelfVersion: "v1.2.3"}
+
+	var buf bytes.Buffer
+	if err := writeDaemonStatusJSON(&buf, rep); err != nil {
+		t.Fatalf("writeDaemonStatusJSON: %v", err)
+	}
+	if strings.Contains(buf.String(), `"sessions"`) {
+		t.Errorf("not-running status --json should omit sessions: %s", buf.String())
+	}
+}
+
 // TestWriteDaemonStatusJSONOmitsWatchWhenNotRunning proves a not-running
 // report keeps the JSON minimal: no watch object.
 func TestWriteDaemonStatusJSONOmitsWatchWhenNotRunning(t *testing.T) {

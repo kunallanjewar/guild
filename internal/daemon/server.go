@@ -394,6 +394,8 @@ func (s *Server) writeStatus(ctx context.Context, conn net.Conn) {
 		ActiveSessions: int(s.active.Load()),
 		EmbedderState:  state,
 		Watch:          s.watchStatus(),
+		Sessions:       s.sessionStatuses(),
+		LeasesReaped:   s.leasesReaped(),
 	}
 	data, err := json.Marshal(st)
 	if err != nil {

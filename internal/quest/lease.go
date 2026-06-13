@@ -441,6 +441,46 @@ func ExpiredLeases(ctx context.Context, db *sql.DB, now time.Time) ([]Lease, err
 	return out, nil
 }
 
+// ListLeaseQuestsForSession returns the task ids of every lease sessionID
+// currently holds, ordered for deterministic output. The daemon's
+// per-session heartbeat reconciles its in-memory presence view from this
+// (the tick already opens a handle per session, so reporting the held set
+// adds no extra round-trip to any hot path), and the daemon-status readout
+// surfaces the ids per session. An empty session id or a session holding
+// no leases returns an empty slice, not an error.
+func ListLeaseQuestsForSession(ctx context.Context, db *sql.DB, sessionID string) ([]string, error) {
+	if db == nil {
+		return nil, fmt.Errorf("quest: list session leases: nil db")
+	}
+	if sessionID = strings.TrimSpace(sessionID); sessionID == "" {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx,
+		`SELECT task_id
+		 FROM task_leases
+		 WHERE session_id = ?
+		 ORDER BY task_id`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("quest: list session leases: query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			return nil, fmt.Errorf("quest: list session leases: scan: %w", err)
+		}
+		out = append(out, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("quest: list session leases: iterate: %w", err)
+	}
+	return out, nil
+}
+
 // DeleteLease removes the lease for one (project_id, task_id). The reaper
 // calls this after it has forfeited the stale claim. Deleting a missing
 // lease is a no-op, not an error.

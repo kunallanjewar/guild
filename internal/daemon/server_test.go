@@ -475,3 +475,87 @@ func TestNewServer_RequiresSessionsHandler(t *testing.T) {
 		t.Fatal("NewServer accepted a Config without a Sessions handler")
 	}
 }
+
+// TestRun_StatusReportsPresenceDetail verifies the status reply carries the
+// per-session presence detail (ADR-005 Phase 3) from the wired registry and
+// the lifetime reap counter from the wired reaper. The registry is populated
+// directly (the production path registers on connect); the reaper's counter
+// is driven by a sweep. This pins the wire shape `guild daemon status`
+// renders.
+func TestRun_StatusReportsPresenceDetail(t *testing.T) {
+	setHome(t)
+	sock := shortSocketPath(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reg := NewRegistry(RegistryConfig{Logger: quietLogger()})
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	reg.Register("4242", "alpha", at)
+	reg.SetHeldQuests("4242", []string{"QUEST-3"})
+
+	reaper := NewReaper(ReaperConfig{Logger: quietLogger()})
+	reaper.totalForfeited.Store(2) // as if two zombie claims were reaped
+
+	srv, err := NewServer(Config{
+		Version:       "v-presence",
+		SocketPath:    sock,
+		Sessions:      blockingHandler,
+		EmbedderState: func(context.Context) string { return "disabled" },
+		Registry:      reg,
+		Reaper:        reaper,
+		Logger:        quietLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	startDaemon(t, ctx, srv, sock)
+
+	st := requestStatus(t, sock)
+	if st.LeasesReaped != 2 {
+		t.Errorf("LeasesReaped = %d, want 2", st.LeasesReaped)
+	}
+	if len(st.Sessions) != 1 {
+		t.Fatalf("Sessions = %d, want 1: %+v", len(st.Sessions), st.Sessions)
+	}
+	s := st.Sessions[0]
+	if s.ID != "4242" || s.Project != "alpha" {
+		t.Errorf("session identity = %+v, want id 4242 project alpha", s)
+	}
+	if len(s.HeldQuests) != 1 || s.HeldQuests[0] != "QUEST-3" {
+		t.Errorf("HeldQuests = %v, want [QUEST-3]", s.HeldQuests)
+	}
+	if !s.ConnectedAt.Equal(at) {
+		t.Errorf("ConnectedAt = %v, want %v", s.ConnectedAt, at)
+	}
+}
+
+// TestRun_StatusPresenceEmptyWhenNoRegistry verifies a daemon built without a
+// registry (a Phase 1 daemon) reports no per-session detail and a zero reap
+// counter, so the status line degrades cleanly to the active-count summary.
+func TestRun_StatusPresenceEmptyWhenNoRegistry(t *testing.T) {
+	setHome(t)
+	sock := shortSocketPath(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := NewServer(Config{
+		Version:    "v-noreg",
+		SocketPath: sock,
+		Sessions:   blockingHandler,
+		Logger:     quietLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	startDaemon(t, ctx, srv, sock)
+
+	st := requestStatus(t, sock)
+	if len(st.Sessions) != 0 {
+		t.Errorf("Sessions = %+v, want empty without a registry", st.Sessions)
+	}
+	if st.LeasesReaped != 0 {
+		t.Errorf("LeasesReaped = %d, want 0 without a reaper", st.LeasesReaped)
+	}
+}

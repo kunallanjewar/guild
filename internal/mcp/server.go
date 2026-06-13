@@ -11,6 +11,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/mathomhaus/guild/internal/daemon"
 	"github.com/mathomhaus/guild/internal/session"
 )
 
@@ -84,6 +85,26 @@ type serverCore struct {
 	// byte-identical no-daemon contract); only the daemon sets it, bound
 	// to the connection's session identity.
 	lease any
+
+	// presence is the daemon's live-session presence source (ADR-005 Phase
+	// 3). Non-nil ONLY when this server is served inside a running daemon:
+	// guild_session_start reads it to append the "N agents active" line.
+	// Nil for the stdio and in-process fallback paths, where no session
+	// registry exists, so session_start emits no presence line and stays
+	// byte-identical to today. It is read from the in-memory registry
+	// snapshot only, never the db, so it adds no round-trip to session_start.
+	presence PresenceSource
+}
+
+// PresenceSource is the seam guild_session_start reads to render the
+// daemon-only "N agents active" line. The daemon wires its session
+// registry behind it; the stdio and in-process paths leave it nil, which is
+// the byte-identical no-daemon contract: no registry, no presence line. It
+// is satisfied by *daemon.Registry without an adapter (see daemon.go).
+type PresenceSource interface {
+	// Presence returns the live-session count and the on-lease session
+	// count as a single in-memory read (no db round-trip).
+	Presence() daemon.Presence
 }
 
 // inferProject resolves the project from this server's connection cwd:
@@ -141,6 +162,14 @@ type Options struct {
 	// fallback default) is the byte-identical no-daemon path: no lease row
 	// is ever written.
 	Lease any
+
+	// Presence is the optional daemon session-presence source (ADR-005
+	// Phase 3). The daemon passes its session registry so
+	// guild_session_start can append the "N agents active" line; the stdio
+	// and in-process fallback paths leave it nil so session_start emits no
+	// presence line and stays byte-identical to today. Read in-memory only,
+	// so it adds no db round-trip to the session_start hot path.
+	Presence PresenceSource
 }
 
 // NewServer constructs a fully registered guild MCP server from opts.
@@ -183,7 +212,7 @@ func NewServer(opts Options) (*sdkmcp.Server, error) {
 
 	// Register all tools (bootstrap + always-on) against this server's
 	// core. See register.go.
-	registerAll(s, &serverCore{sessions: sessions, providers: providers, cwd: opts.CWD, lease: opts.Lease})
+	registerAll(s, &serverCore{sessions: sessions, providers: providers, cwd: opts.CWD, lease: opts.Lease, presence: opts.Presence})
 
 	return s, nil
 }

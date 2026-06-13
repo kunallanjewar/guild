@@ -87,6 +87,39 @@ type Status struct {
 	// daemon started. Always present; a daemon with watch disabled
 	// reports Enabled=false and zero counters.
 	Watch WatchStatus `json:"watch"`
+	// Sessions is the per-session presence detail from the registry
+	// snapshot: one entry per live shim connection (ADR-005 Phase 3),
+	// ordered by session id. Empty (or omitted on the wire) when no
+	// sessions are live or the daemon was built without a registry. The
+	// active count above is the authoritative connection count; this slice
+	// is the registry's view of the same sessions plus the project, ages,
+	// and held quest ids each one carries.
+	Sessions []SessionStatus `json:"sessions,omitempty"`
+	// LeasesReaped is the lifetime count of zombie claims the reaper has
+	// forfeited since the daemon started (ADR-005 Phase 3). Zero when no
+	// reaper is wired or none have lapsed yet.
+	LeasesReaped int64 `json:"leases_reaped"`
+}
+
+// SessionStatus is the status-line view of one live session in the
+// registry, mirroring [Session] across the socket so `guild daemon status`
+// can render per-session presence detail. Keys are stable and append-only.
+type SessionStatus struct {
+	// ID is the daemon's per-session identity (the shim's pid as a string).
+	ID string `json:"id"`
+	// Project is the active project the session resolved to, empty when it
+	// has not bound one yet.
+	Project string `json:"project,omitempty"`
+	// ConnectedAt is when the session attached, serialized RFC 3339.
+	ConnectedAt time.Time `json:"connected_at"`
+	// LastHeartbeat is when the heartbeat tick last refreshed this session's
+	// leases (or its connect time before the first tick), serialized RFC
+	// 3339. The readout surfaces it as "last seen".
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	// HeldQuests is the quest ids whose leases this session holds, per the
+	// registry's last in-memory reconciliation. Empty for a session holding
+	// no leases.
+	HeldQuests []string `json:"held_quests,omitempty"`
 }
 
 // WatchStatus is the status-line view of the daemon's watch pipeline. The

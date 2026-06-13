@@ -80,7 +80,18 @@ type Session struct {
 	// leases, or the connect time before the first tick. The presence
 	// readout surfaces it as "last seen".
 	LastHeartbeat time.Time
+	// HeldQuests is the set of quest ids whose leases this session holds, as
+	// last reconciled by the heartbeat tick (and seeded on a session's first
+	// accept). It is in-memory only: the lease rows in the db are the source
+	// of truth, but the presence readout and the daemon-status detail read
+	// this copy so neither path takes a db round-trip. Ordered for stable
+	// output. Empty for a session holding no leases.
+	HeldQuests []string
 }
+
+// OnLease reports whether the session currently holds at least one lease,
+// per the last reconciled in-memory view.
+func (s Session) OnLease() bool { return len(s.HeldQuests) > 0 }
 
 // RenewFunc refreshes every lease the identified session holds: heartbeat
 // to now, expiry to now+TTL. The host wires it over quest.RenewLeasesForSession
@@ -227,6 +238,29 @@ func (r *Registry) Touch(sessionID string) {
 	r.mu.Unlock()
 }
 
+// SetHeldQuests records the set of quest ids whose leases sessionID holds,
+// for the in-memory presence and daemon-status views. The host calls it
+// from the heartbeat renewal seam (which already opens a per-session db
+// handle, so the reconciliation adds no extra round-trip to a hot path) and
+// on a session's first accept (so presence reflects a just-taken claim
+// before the next tick). It copies and sorts ids so the caller cannot
+// mutate registry state through the slice and the readout is deterministic.
+// A SetHeldQuests for an unregistered session is a no-op: a detached
+// session has no presence entry to annotate.
+func (r *Registry) SetHeldQuests(sessionID string, questIDs []string) {
+	if sessionID == "" {
+		return
+	}
+	held := make([]string, len(questIDs))
+	copy(held, questIDs)
+	sort.Strings(held)
+	r.mu.Lock()
+	if s, ok := r.sessions[sessionID]; ok {
+		s.HeldQuests = held
+	}
+	r.mu.Unlock()
+}
+
 // IsLive reports whether sessionID is currently registered (a live shim
 // connection). The lease reaper consults it before forfeiting an expired
 // lease: a still-registered session is a missed heartbeat under load, not a
@@ -243,13 +277,40 @@ func (r *Registry) IsLive(sessionID string) bool {
 }
 
 // Count returns the number of live sessions. It is the cheap active-count
-// seam the presence consumer (a follow-on quest) reads without taking a
-// full snapshot.
+// seam the presence consumer reads without taking a full snapshot.
 func (r *Registry) Count() int {
 	r.mu.Lock()
 	n := len(r.sessions)
 	r.mu.Unlock()
 	return n
+}
+
+// Presence is the in-memory snapshot the session-start presence line reads:
+// how many sessions are live and how many of them currently hold at least
+// one lease, per the last reconciled view. It takes the lock once and reads
+// only in-memory state (no db round-trip), so the session-start hot path
+// stays cheap. The on-lease count never exceeds the session count.
+type Presence struct {
+	// Sessions is the number of live shim connections.
+	Sessions int
+	// OnLease is how many of those sessions currently hold at least one
+	// lease, per the heartbeat's last in-memory reconciliation.
+	OnLease int
+}
+
+// Presence returns the active-session count and the on-lease session count
+// in a single locked read for the session-start presence line. In-memory
+// only: it never touches the db.
+func (r *Registry) Presence() Presence {
+	r.mu.Lock()
+	p := Presence{Sessions: len(r.sessions)}
+	for _, s := range r.sessions {
+		if len(s.HeldQuests) > 0 {
+			p.OnLease++
+		}
+	}
+	r.mu.Unlock()
+	return p
 }
 
 // Snapshot returns a copy of every live session, ordered by session id for

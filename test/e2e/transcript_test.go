@@ -89,6 +89,45 @@ var idScrubRules = []scrubRule{
 	{regexp.MustCompile(`\bQUEST-\d+\b`), "QUEST-<N>"},
 }
 
+// daemonOnlyLinePrefixes is the closed, documented allowlist of output line
+// prefixes that exist ONLY when a session is served by a running daemon (the
+// goldens are recorded in direct mode, where no such line is emitted). Phase
+// 3 introduces the first one: the guild_session_start presence line ("N
+// agents active"), which the in-process path cannot produce because no
+// session registry exists there. A daemon-mode run strips these lines before
+// comparing, so the single shared golden serves both modes; in direct mode
+// the strip is a no-op (the line never appears), keeping the no-daemon
+// transcript a strict match. Everything else stays byte-compared, so any
+// other daemon-induced drift still fails the gate, and a future additive
+// daemon-only line must register its prefix here consciously rather than
+// slip past. The 👥 prefix is the presence line's stable marker. Indentation
+// is stripped before the prefix check because step() indents every body
+// line by two spaces.
+var daemonOnlyLinePrefixes = []string{
+	"👥 ",
+}
+
+// stripDaemonOnlyLines drops every line whose trimmed text begins with an
+// allowlisted daemon-only prefix.
+func stripDaemonOnlyLines(s string) string {
+	lines := strings.Split(s, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		drop := false
+		for _, prefix := range daemonOnlyLinePrefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 // scrubbed returns the transcript text after the scrub pass.
 func (tr *transcript) scrubbed() string {
 	out := tr.b.String()
@@ -100,7 +139,7 @@ func (tr *transcript) scrubbed() string {
 			out = r.re.ReplaceAllString(out, r.rep)
 		}
 	}
-	return out
+	return stripDaemonOnlyLines(out)
 }
 
 // fingerprint summarizes a large deterministic blob (the INSTRUCTIONS
@@ -172,4 +211,40 @@ func nextLine(wantLines, gotLines []string, n int) string {
 		return "got has: " + gotLines[n]
 	}
 	return ""
+}
+
+// TestDaemonOnlyLineStripIsLoadBearing proves the daemon-only-line carve-out
+// in the scrub does real work and would fail if removed while the line still
+// renders. It builds two transcripts that differ ONLY by the daemon-mode
+// presence line (the direct-mode golden has no such line) and asserts:
+//
+//   - the raw bodies genuinely diverge (the presence line is a real diff), and
+//   - after the daemon-only strip the daemon-mode body equals the direct-mode
+//     body, so the single shared golden serves both modes.
+//
+// This guard does not need docker, so it runs in a plain `go test`.
+func TestDaemonOnlyLineStripIsLoadBearing(t *testing.T) {
+	const presencePrefix = "👥 "
+	covered := false
+	for _, p := range daemonOnlyLinePrefixes {
+		if p == presencePrefix {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Fatalf("presence prefix %q is not in daemonOnlyLinePrefixes; the carve-out is missing", presencePrefix)
+	}
+
+	// step() indents body lines by two spaces; mirror that so the trimmed
+	// prefix check is exercised exactly as it is on real transcripts.
+	directBody := "  📍 active project: e2eproj\n  📊 board: 0 oaths, 0 bounties, 0 echoes\n"
+	daemonBody := "  📍 active project: e2eproj\n  📊 board: 0 oaths, 0 bounties, 0 echoes\n  " + presencePrefix + "1 agent active\n"
+
+	if directBody == daemonBody {
+		t.Fatal("test bodies are identical; the presence line is not actually a difference")
+	}
+	if got, want := stripDaemonOnlyLines(daemonBody), stripDaemonOnlyLines(directBody); got != want {
+		t.Fatalf("strip did not reconcile the daemon-only line:\ndirect: %q\ndaemon: %q", want, got)
+	}
 }

@@ -249,6 +249,10 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 			rep.Status.PID, rep.Status.Version, rep.Uptime,
 			rep.Status.ActiveSessions, rep.Status.EmbedderState, rep.SocketPath)
 		fmt.Fprintln(out, formatWatchLine(rep.Status.Watch))
+		fmt.Fprintln(out, daemon.FormatLeasesLine(rep.Status.LeasesReaped))
+		for _, line := range daemon.FormatSessionLines(rep.Status.Sessions, time.Now()) {
+			fmt.Fprintln(out, line)
+		}
 		if rep.DriftNudge != "" {
 			fmt.Fprintln(out, rep.DriftNudge)
 		}
@@ -289,17 +293,29 @@ func formatWatchLine(w daemon.WatchStatus) string {
 // daemonStatusView is the --json shape of `guild daemon status`. Keys
 // are stable; additions are append-only.
 type daemonStatusView struct {
-	Running        bool             `json:"running"`
-	PID            int              `json:"pid,omitempty"`
-	Version        string           `json:"version,omitempty"`
-	SelfVersion    string           `json:"self_version"`
-	StartedAt      string           `json:"started_at,omitempty"`
-	UptimeSeconds  int64            `json:"uptime_seconds"`
-	ActiveSessions int              `json:"active_sessions"`
-	EmbedderState  string           `json:"embedder_state,omitempty"`
-	SocketPath     string           `json:"socket_path,omitempty"`
-	VersionDrift   bool             `json:"version_drift"`
-	Watch          *daemonWatchView `json:"watch,omitempty"`
+	Running        bool                `json:"running"`
+	PID            int                 `json:"pid,omitempty"`
+	Version        string              `json:"version,omitempty"`
+	SelfVersion    string              `json:"self_version"`
+	StartedAt      string              `json:"started_at,omitempty"`
+	UptimeSeconds  int64               `json:"uptime_seconds"`
+	ActiveSessions int                 `json:"active_sessions"`
+	EmbedderState  string              `json:"embedder_state,omitempty"`
+	SocketPath     string              `json:"socket_path,omitempty"`
+	VersionDrift   bool                `json:"version_drift"`
+	Watch          *daemonWatchView    `json:"watch,omitempty"`
+	LeasesReaped   int64               `json:"leases_reaped"`
+	Sessions       []daemonSessionView `json:"sessions,omitempty"`
+}
+
+// daemonSessionView is the --json shape of one live session's presence
+// detail. Present only when the daemon is running with live sessions.
+type daemonSessionView struct {
+	ID            string   `json:"id"`
+	Project       string   `json:"project,omitempty"`
+	ConnectedAt   string   `json:"connected_at"`
+	LastHeartbeat string   `json:"last_heartbeat"`
+	HeldQuests    []string `json:"held_quests,omitempty"`
 }
 
 // daemonWatchView is the --json shape of the watch pipeline state. Present
@@ -330,6 +346,16 @@ func writeDaemonStatusJSON(out io.Writer, rep daemon.StatusReport) error {
 		view.ActiveSessions = rep.Status.ActiveSessions
 		view.EmbedderState = rep.Status.EmbedderState
 		view.SocketPath = rep.SocketPath
+		view.LeasesReaped = rep.Status.LeasesReaped
+		for _, sess := range rep.Status.Sessions {
+			view.Sessions = append(view.Sessions, daemonSessionView{
+				ID:            sess.ID,
+				Project:       sess.Project,
+				ConnectedAt:   sess.ConnectedAt.Format(time.RFC3339),
+				LastHeartbeat: sess.LastHeartbeat.Format(time.RFC3339),
+				HeldQuests:    sess.HeldQuests,
+			})
+		}
 		w := rep.Status.Watch
 		view.Watch = &daemonWatchView{
 			Enabled:         w.Enabled,

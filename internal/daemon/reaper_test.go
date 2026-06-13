@@ -188,3 +188,44 @@ func TestReaper_ConcurrentTicksRaceClean(t *testing.T) {
 		clk.tick()
 	}
 }
+
+// TestReaper_TotalForfeitedAccumulates verifies the lifetime forfeit counter
+// accumulates across sweeps that forfeit, ignores sweeps that forfeit
+// nothing, and is the value the daemon-status readout surfaces.
+//
+// The unbuffered fake-clock tick is a barrier: a tick() that returns proves
+// the loop consumed the PRIOR tick and looped back, so the prior sweep has
+// finished. The test drives three forfeit-relevant sweeps (2, 0, 1) and uses
+// a final barrier tick to confirm the third sweep ran before asserting the
+// counter is exactly 2 + 0 + 1 = 3.
+func TestReaper_TotalForfeitedAccumulates(t *testing.T) {
+	var call int64
+	r, clk := newTestReaper(t, ReaperConfig{
+		Interval: time.Minute,
+		Reap: func(context.Context) (ReapOutcome, error) {
+			switch atomic.AddInt64(&call, 1) {
+			case 1:
+				return ReapOutcome{Scanned: 2, Forfeited: 2}, nil
+			case 2:
+				return ReapOutcome{Scanned: 0}, nil // nothing expired
+			case 3:
+				return ReapOutcome{Scanned: 1, Forfeited: 1}, nil
+			default:
+				// A barrier sweep (the 4th tick proves the 3rd finished)
+				// must not move the counter, so the assertion is exact.
+				return ReapOutcome{Scanned: 0}, nil
+			}
+		},
+	})
+	stop := runReaper(t, r)
+	defer stop()
+
+	clk.tick() // deliver sweep 1
+	clk.tick() // delivering sweep 2 proves sweep 1 finished
+	clk.tick() // delivering sweep 3 proves sweep 2 finished
+	clk.tick() // delivering sweep 4 proves sweep 3 (Forfeited:1) finished
+
+	if got := r.TotalForfeited(); got != 3 {
+		t.Fatalf("TotalForfeited = %d, want 3 (sweeps forfeited 2 + 0 + 1)", got)
+	}
+}

@@ -180,6 +180,13 @@ func TestDaemonHost_E2E_RealClientOverUnixSocket(t *testing.T) {
 		t.Fatalf("session did not resolve the preamble cwd's project; body:\n%s", body)
 	}
 
+	// Presence (ADR-005 Phase 3): a daemon-served session_start carries the
+	// daemon-only presence line, sourced from the registry the session
+	// registered on. This single live connection reads "1 agent active".
+	if !strings.Contains(body, "👥 1 agent active") {
+		t.Fatalf("daemon session_start missing presence line; body:\n%s", body)
+	}
+
 	// The session file is keyed by the SHIM's pid, mirroring what the
 	// shim's own in-process server would have written.
 	assertSessionFileProject(t, home, shimPID, projID)

@@ -8,6 +8,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/mathomhaus/guild/internal/daemon"
 	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/lore/embed"
 	"github.com/mathomhaus/guild/internal/project"
@@ -205,6 +206,22 @@ func (c *serverCore) handleSessionStart(
 		boardLine = fmt.Sprintf("📊 board: %d oaths, %d bounties, %d echoes\n", oathCount, bountyCount, echoCount)
 	}
 
+	// Presence line (ADR-005 Phase 3): the FIRST intentional daemon-only
+	// additive output in session_start. When this server is served inside a
+	// running daemon (c.presence non-nil), append exactly one line reporting
+	// how many agents are live and, when any hold a lease, how many are on
+	// lease, sourced from the in-memory registry snapshot (no db round-trip).
+	// Suppressed in brief-only mode, which carries no board context. On the
+	// stdio and in-process fallback paths there is no registry, so
+	// c.presence is nil and no line is emitted: session_start stays
+	// byte-identical to today, which the daemon parity suite enforces (it
+	// strips this one documented daemon-only prefix from the daemon-up arm
+	// before the byte-for-byte comparison).
+	var presenceLine string
+	if c.presence != nil && !in.BriefOnly {
+		presenceLine = formatPresenceLine(c.presence.Presence()) + "\n"
+	}
+
 	// "While you slept" narration: consume any completed, unnarrated
 	// sleep passes and surface them as one moon-prefixed line directly
 	// after the board summary (directly after the header in brief-only
@@ -217,7 +234,7 @@ func (c *serverCore) handleSessionStart(
 		sleepLine = line + "\n"
 	}
 
-	full := header + "\n" + boardLine + sleepLine + "\n" + body
+	full := header + "\n" + boardLine + presenceLine + sleepLine + "\n" + body
 	respBytes = uint(len(full))
 
 	// Degraded no-daemon fallback (ADR-005 Part 2): fire one bounded,
@@ -230,6 +247,31 @@ func (c *serverCore) handleSessionStart(
 	maybeTriggerSleepAutopass(c.providers.embed, newLogger())
 
 	return textResult(full), nil, nil
+}
+
+// formatPresenceLine renders the daemon-only "N agents active" line from an
+// in-memory registry presence snapshot. The agent count includes the
+// calling session itself (it is registered before its session_start runs),
+// so a lone agent reads "1 agent active". When at least one session holds a
+// lease, an on-lease clause is appended ("N agents active, M on lease"),
+// surfacing the liveness Phase 3 exists for; with no leases held the clause
+// is omitted so the common case stays terse. The count is singularized for
+// readability.
+func formatPresenceLine(p daemon.Presence) string {
+	line := fmt.Sprintf("👥 %s active", pluralAgents(p.Sessions))
+	if p.OnLease > 0 {
+		line += fmt.Sprintf(", %d on lease", p.OnLease)
+	}
+	return line
+}
+
+// pluralAgents renders the agent count with a singular/plural noun
+// ("1 agent" / "2 agents").
+func pluralAgents(n int) string {
+	if n == 1 {
+		return "1 agent"
+	}
+	return fmt.Sprintf("%d agents", n)
 }
 
 // renderBounties loads the briefing + oath + top task for projectID
