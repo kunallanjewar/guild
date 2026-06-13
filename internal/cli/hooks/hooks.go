@@ -106,20 +106,36 @@ func targetState(ad adapters.Adapter, base hookcfg.Config) (st syncStatus, path 
 	if len(current) == 0 {
 		return statusMissing, path, nil
 	}
-	if hooksEqual(current, desiredHooks(ad, base)) {
+	desired, err := desiredHooks(ad, base)
+	if err != nil {
+		return "", path, err
+	}
+	if hooksEqual(current, desired) {
 		return statusInSync, path, nil
 	}
 	return statusDrift, path, nil
 }
 
 // desiredHooks renders the base config through the adapter's
-// Substitute and flattens it for comparison against Scan output.
+// Substitute (and, for adapters that implement adapters.Renderer, the
+// adapter's harness-capability Render) and flattens it for comparison
+// against Scan output. Consulting Render here keeps drift status in
+// agreement with what Install/Sync actually write for harnesses that
+// cannot represent the base config one-to-one.
 // Ownership is keyed on the raw command string, so adapters whose
 // Substitute rewrites the leading "guild" token must keep their own
 // ownership bookkeeping; the stub and the JSON-shaped adapters do not
 // rewrite it.
-func desiredHooks(ad adapters.Adapter, base hookcfg.Config) []hookcfg.Hook {
-	return sortedHooks(hookcfg.Flatten(hookcfg.ApplySubstitution(base, ad.Substitute)))
+func desiredHooks(ad adapters.Adapter, base hookcfg.Config) ([]hookcfg.Hook, error) {
+	cfg := hookcfg.ApplySubstitution(base, ad.Substitute)
+	if r, ok := ad.(adapters.Renderer); ok {
+		rendered, err := r.Render(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("hooks: render desired state for %s: %w", ad.Name(), err)
+		}
+		cfg = rendered
+	}
+	return sortedHooks(hookcfg.Flatten(cfg)), nil
 }
 
 // guildOwnedOnly filters the flattened scan view down to guild-owned

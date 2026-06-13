@@ -163,9 +163,12 @@ Wires guild into your harness's lifecycle hooks so context arrives proactively: 
 
 Supported harnesses:
 
-| Harness | Hook support |
-| --- | --- |
-| Claude Code | first-class hooks (verified on Claude Code 2.1.132): `SessionStart`, `PreCompact`, and `UserPromptSubmit` written to the project's `.claude/settings.json` |
+| Harness | Hook support | Settings file |
+| --- | --- | --- |
+| Claude Code | first-class hooks (verified on Claude Code 2.1.132): `SessionStart`, `PreCompact`, and `UserPromptSubmit` | `<project>/.claude/settings.json` |
+| Codex CLI | first-class hooks (Codex v0.128.0 spike-confirmed) | `<repo>/.codex/hooks.json` |
+
+Codex has no compaction lifecycle, so its adapter writes only the session-start and prompt hooks (the pre-compaction capture stays Claude-Code-shaped in the base config and is skipped for Codex). Codex documents a `[features] codex_hooks = true` gate in `~/.codex/config.toml`; current versions fire hooks without it, so `guild hooks install` test-fires `codex exec` after writing the file and tells you if your version still needs the flag. Guild never edits `~/.codex/config.toml` itself.
 
 See a few [`examples/`](./examples/) of what guild can do. All small scenarios, each under 5 minutes.
 
