@@ -158,6 +158,20 @@ type Deps struct {
 	// CLI verbs that never inscribe pay no config read. A nil func or
 	// nil map falls back to the built-in kind defaults in internal/lore.
 	LoreValidDays func() map[string]int
+	// Lease is the optional quest-lease port (ADR-005 Part 1, daemon
+	// Phase 3). The field type is `any` so the command package does not
+	// import internal/quest (which would create a cycle: quest registers
+	// commands, command depends on quest). The quest_accept handler
+	// type-asserts this to a quest.LeaseAcquirer via leaseFromDeps(d) and
+	// records a lease after a claim commits, best-effort.
+	//
+	// A nil value (the default) is the no-daemon path: quest_accept
+	// performs exactly today's writes and creates zero task_leases rows,
+	// so its DB effects stay byte-identical. Only the daemon constructs
+	// Deps with a non-nil Lease, bound to its per-session identity. The
+	// in-process stdio server and the plain CLI leave it nil. See
+	// internal/quest/lease.go for the port definition.
+	Lease any
 }
 
 // ResolveLoreValidDays returns the configured per-kind valid_days
