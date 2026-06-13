@@ -181,6 +181,7 @@ func init() {
 func bindRegistryVerb[I, O any](parent *cobra.Command, spec *command.Command[I, O], deps command.Deps, telemetryLabel string) {
 	spec.BindCobra(parent, deps)
 	wrapTelemetry(parent, spec.CLIPath[len(spec.CLIPath)-1], telemetryLabel)
+	cliRegistryBoundVerbs = append(cliRegistryBoundVerbs, spec.Name)
 }
 
 // wrapTelemetry decorates the named subcommand's RunE with a telemetry
@@ -220,13 +221,17 @@ func wrapTelemetry(parent *cobra.Command, name, subcmd string) {
 // buildCLICommandDeps constructs the Deps bundle for CLI-side command
 // registry adapters. Consolidates DB open + project resolution behind
 // the surface-neutral Deps shape so Handlers stay ignorant of cobra.
-// Embed is wired via wireQuestEmbedDeps so `guild quest search` reaches
-// the RRF arm when quest corpus coverage is at or above 0.90 (QUEST-259).
-// The per-process Index build cost (~50-200 ms for a ~250-quest corpus)
-// is accepted for the CLI surface: the maintainer decided CLI parity
-// with MCP is worth the startup overhead.
+//
+// ExecRemote routes the Handler through a live, version-matched guild
+// daemon when one is up (ADR-005 single writer); every transport
+// failure falls back to the local Handler, so daemon-down behavior is
+// unchanged. Embed defers wireQuestEmbedDeps to first LOCAL Handler use
+// via cliQuestEmbedSource: `guild quest search` still reaches the RRF
+// arm at quest corpus coverage >= 0.90 (QUEST-259) with the accepted
+// ~50-200 ms wiring cost, but a daemon-routed search skips it; the
+// daemon's shared embedder serves instead.
 func buildCLICommandDeps() command.Deps {
-	d := command.Deps{
+	return command.Deps{
 		OpenDB: openQuestDB,
 		ResolveProj: func(ctx context.Context, argProject string) (string, error) {
 			db, err := openQuestDB(ctx)
@@ -245,14 +250,9 @@ func buildCLICommandDeps() command.Deps {
 		// quest post --spec inscribes a kind=decision lore entry, so the
 		// quest surface needs the configured decay windows too.
 		LoreValidDays: cliLoreValidDays,
+		ExecRemote:    remoteExecViaDaemon,
+		Embed:         &cliQuestEmbedSource{},
 	}
-	// command.Deps.Embed is `any`; assigning a typed-nil pointer would
-	// produce a non-nil interface value and defeat questEmbedFromDeps's
-	// nil guard. Assign only when wiring yielded a real *QuestEmbedDeps.
-	if e := wireQuestEmbedDeps(); e != nil {
-		d.Embed = e
-	}
-	return d
 }
 
 // wireQuestEmbedDeps builds a *quest.QuestEmbedDeps for the CLI surface.

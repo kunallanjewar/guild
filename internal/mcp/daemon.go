@@ -46,6 +46,27 @@ func NewDaemonHost() *DaemonHost {
 // same logger the per-session servers use.
 func (h *DaemonHost) Logger() *slog.Logger { return h.logger }
 
+// QuestEmbedSource exposes the host's shared quest-side embed provider
+// as an opaque command.Deps.Embed value, so daemon-routed CLI verbs
+// (the JSON-exec dispatch in internal/cli) search through the SAME
+// embedder every MCP session uses instead of wiring a second one.
+// Returns a true nil interface when the provider is absent so callers'
+// nil checks behave.
+func (h *DaemonHost) QuestEmbedSource() any {
+	if h.providers == nil || h.providers.questEmbed == nil {
+		return nil
+	}
+	return h.providers.questEmbed
+}
+
+// LoreEmbedSource is the lore-side sibling of QuestEmbedSource.
+func (h *DaemonHost) LoreEmbedSource() any {
+	if h.providers == nil || h.providers.embed == nil {
+		return nil
+	}
+	return h.providers.embed
+}
+
 // ServeSession serves one complete MCP session over conn (the raw
 // newline-delimited JSON-RPC stream that follows the shim preamble)
 // and blocks until the peer disconnects or ctx is cancelled. It is the
