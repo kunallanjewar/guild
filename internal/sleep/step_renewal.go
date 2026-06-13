@@ -185,7 +185,7 @@ func (RenewalStep) Run(ctx context.Context, pc *PassContext) (StepReport, error)
 		}
 		if len(echoes) == 0 {
 			// Healthy project: no fading echoes. Quiet on purpose, no
-			// journal row — a recurring empty row per project per pass
+			// journal row, since a recurring empty row per project per pass
 			// would drown the journal (same rationale as the embed step's
 			// zero-pending skip).
 			continue
