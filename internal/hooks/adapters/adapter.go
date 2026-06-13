@@ -53,3 +53,21 @@ type Adapter interface {
 	// string. Adapters without placeholders return cmd unchanged.
 	Substitute(cmd string) string
 }
+
+// Renderer is an optional interface for adapters whose harness cannot
+// represent the base config one-to-one. Render maps an
+// already-substituted config onto the harness's capabilities: dropping
+// events the harness has no hook for, narrowing matcher vocabularies
+// to the values the harness dispatches on, and adding
+// harness-specific presentation fields. It returns an error for
+// configs the harness must reject (e.g. a matcher on an event that
+// does not support one) rather than silently writing a hook that can
+// never fire.
+//
+// Render must not mutate cfg; it returns a fresh Config. Adapters that
+// implement Renderer apply it inside Install/Sync, and the CLI applies
+// it when computing desired state, so drift status agrees with what
+// the adapter actually writes.
+type Renderer interface {
+	Render(cfg Config) (Config, error)
+}

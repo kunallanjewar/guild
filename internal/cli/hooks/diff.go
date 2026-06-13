@@ -81,7 +81,10 @@ func runDiff(d deps, noColor bool) error {
 			return fmt.Errorf("scan %s: %w", ad.Name(), err)
 		}
 		current := guildOwnedOnly(scanned)
-		desired := desiredHooks(ad, base)
+		desired, err := desiredHooks(ad, base)
+		if err != nil {
+			return err
+		}
 
 		inDesired := map[string]bool{}
 		for _, h := range desired {

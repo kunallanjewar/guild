@@ -75,10 +75,15 @@ const baseFileName = "hooks-base.json"
 // owner-only for consistency with the rest of guild's local state.
 const basePerm os.FileMode = 0o600
 
-// Command is one executable hook inside a group.
+// Command is one executable hook inside a group. StatusMessage is an
+// optional harness-specific progress label (Codex renders it in its UI
+// while the hook runs); adapters whose harness supports it set the
+// field while rendering, base configs normally omit it. It carries no
+// dispatch semantics and is ignored by ownership and drift comparisons.
 type Command struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
+	Type          string `json:"type"`
+	Command       string `json:"command"`
+	StatusMessage string `json:"statusMessage,omitempty"`
 }
 
 // Group is one matcher block: an optional harness dispatch pattern plus
