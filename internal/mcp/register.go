@@ -6,9 +6,26 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/mathomhaus/guild/internal/command"
+	"github.com/mathomhaus/guild/internal/config"
 	"github.com/mathomhaus/guild/internal/lore"
 	"github.com/mathomhaus/guild/internal/quest"
 )
+
+// loreValidDaysFromConfig loads the merged config and returns the
+// per-kind valid_days windows ([inscribe.valid_days]) for lore writes.
+// Returns nil on load failure so the built-in kind defaults apply: a
+// broken config file must never block an inscribe (matching the
+// swallow-and-degrade posture of recordMCPTelemetry). Wired as
+// command.Deps.LoreValidDays and therefore called lazily per tool
+// invocation, so the long-lived server observes config edits without a
+// restart.
+func loreValidDaysFromConfig() map[string]int {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return nil
+	}
+	return cfg.Inscribe.ValidDays
+}
 
 // Register wires every guild tool onto s against a default per-process
 // core: per-PID session identity plus a fresh provider bundle, exactly
@@ -52,6 +69,7 @@ func (c *serverCore) buildMCPCommandDeps() command.Deps {
 		PrependNarration: true,
 		OpenLoreDB:       openLoreDB,
 		EvaluateHints:    c.providers.hintsBridge(),
+		LoreValidDays:    loreValidDaysFromConfig,
 	}
 	if c.providers.questEmbed != nil {
 		d.Embed = c.providers.questEmbed
@@ -81,6 +99,7 @@ func (c *serverCore) buildMCPLoreDeps() command.Deps {
 		RecordMiss:       recordMCPMiss,
 		PrependNarration: true,
 		EvaluateHints:    c.providers.hintsBridge(),
+		LoreValidDays:    loreValidDaysFromConfig,
 	}
 	if c.providers.embed != nil {
 		d.Embed = c.providers.embed

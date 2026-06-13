@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 
 	"github.com/BurntSushi/toml"
@@ -92,8 +93,46 @@ func fileLayer(path string, dst *Config) error {
 	if md.IsDefined("inscribe", "bloat_severe_threshold") {
 		dst.Inscribe.BloatSevereThreshold = tmp.Inscribe.BloatSevereThreshold
 	}
+	if md.IsDefined("inscribe", "valid_days") {
+		if err := mergeValidDays(path, tmp.Inscribe.ValidDays, dst); err != nil {
+			return err
+		}
+	}
 	if md.IsDefined("telemetry", "usage_log") {
 		dst.Telemetry.UsageLog = tmp.Telemetry.UsageLog
+	}
+	return nil
+}
+
+// mergeValidDays validates the [inscribe.valid_days] table decoded from
+// the file at path and applies it onto dst per key, so kinds absent from
+// this file keep the value from the layer below. Unknown kind keys and
+// negative values fail the load with an error naming the bad key/value;
+// keys are visited in sorted order so the first-named offender is
+// deterministic.
+func mergeValidDays(path string, fromFile map[string]int, dst *Config) error {
+	kinds := make([]string, 0, len(fromFile))
+	for kind := range fromFile {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	for _, kind := range kinds {
+		if !loreKinds[kind] {
+			return fmt.Errorf(
+				"config: %s: [inscribe.valid_days]: unknown kind %q (valid: idea, research, decision, observation, principle)",
+				path, kind)
+		}
+		if days := fromFile[kind]; days < 0 {
+			return fmt.Errorf(
+				"config: %s: [inscribe.valid_days]: %s = %d is negative (use 0 for never stale)",
+				path, kind, days)
+		}
+	}
+	if dst.Inscribe.ValidDays == nil {
+		dst.Inscribe.ValidDays = make(map[string]int, len(fromFile))
+	}
+	for _, kind := range kinds {
+		dst.Inscribe.ValidDays[kind] = fromFile[kind]
 	}
 	return nil
 }

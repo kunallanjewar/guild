@@ -31,6 +31,34 @@ type InscribeConfig struct {
 	// BloatSevereThreshold is the word count above which lore commune --fix
 	// auto-trims bloated principle entries.
 	BloatSevereThreshold int `toml:"bloat_severe_threshold"`
+	// ValidDays maps an entry kind to the valid_days window stamped onto
+	// new entries when the caller does not pass valid_days explicitly.
+	// 0 means "never stale" (stored as NULL). Configured per kind:
+	//
+	//	[inscribe.valid_days]
+	//	research = 30
+	//	decision = 180
+	//
+	// Keys must be one of the five canonical kinds (see loreKinds);
+	// unknown keys and negative values fail config load. Keys absent
+	// from a file keep the value from the layer below (per-key merge,
+	// same as every other config knob).
+	ValidDays map[string]int `toml:"valid_days"`
+}
+
+// loreKinds is the set of canonical entry kinds accepted as keys under
+// [inscribe.valid_days]. It mirrors lore.AllKinds(); the list is kept
+// local because internal/config sits at the bottom of the dependency
+// graph and must not import domain packages (internal/lore deliberately
+// does not import internal/config, and the reverse edge would pin the
+// two packages together forever). TestValidDaysKindsMatchLore asserts
+// this list stays in sync with lore.AllKinds().
+var loreKinds = map[string]bool{
+	"idea":        true,
+	"research":    true,
+	"decision":    true,
+	"observation": true,
+	"principle":   true,
 }
 
 // TelemetryConfig controls per-call usage logging to ~/.guild/usage.log.
@@ -77,6 +105,18 @@ func defaults() Config {
 		Inscribe: InscribeConfig{
 			PrincipleMaxWords:    60,
 			BloatSevereThreshold: 120,
+			// Built-in decay windows: research and decision entries fade;
+			// idea/observation/principle never auto-stale (0 = never stale).
+			// Must match the kindValidDays fallback in internal/lore so
+			// zero-config behavior is byte-identical with or without this
+			// map threaded through.
+			ValidDays: map[string]int{
+				"idea":        0,
+				"research":    30,
+				"decision":    180,
+				"observation": 0,
+				"principle":   0,
+			},
 		},
 		Telemetry: TelemetryConfig{
 			UsageLog: false,
