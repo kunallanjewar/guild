@@ -3,9 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
+
+	"github.com/mathomhaus/guild/internal/lore"
 )
 
 // writeTOML creates a config.toml inside a temporary .guild/ directory under
@@ -536,5 +539,188 @@ func TestRepoConfigPathMissingReturnsEmpty(t *testing.T) {
 	}
 	if path != "" {
 		t.Errorf("missing .guild: expected empty path, got %q", path)
+	}
+}
+
+// ---- unit + integration: [inscribe.valid_days] -----------------------------
+
+// TestDefaultsValidDays pins the built-in per-kind decay windows:
+// research=30, decision=180, idea/observation/principle never stale (0).
+// These must match the kindValidDays fallback in internal/lore so
+// zero-config behavior is byte-identical.
+func TestDefaultsValidDays(t *testing.T) {
+	d := defaults()
+	want := map[string]int{
+		"idea":        0,
+		"research":    30,
+		"decision":    180,
+		"observation": 0,
+		"principle":   0,
+	}
+	if len(d.Inscribe.ValidDays) != len(want) {
+		t.Fatalf("ValidDays defaults: got %d kinds, want %d (%v)",
+			len(d.Inscribe.ValidDays), len(want), d.Inscribe.ValidDays)
+	}
+	for kind, days := range want {
+		if got := d.Inscribe.ValidDays[kind]; got != days {
+			t.Errorf("ValidDays[%q]: got %d want %d", kind, got, days)
+		}
+	}
+}
+
+// TestValidDaysKindsMatchLore asserts the local loreKinds list stays in
+// sync with the canonical lore.AllKinds(). The list is duplicated here
+// (rather than importing internal/lore from production code) to keep
+// internal/config a leaf package; this test is the sync enforcement.
+func TestValidDaysKindsMatchLore(t *testing.T) {
+	canonical := lore.AllKinds()
+	if len(canonical) != len(loreKinds) {
+		t.Fatalf("loreKinds has %d kinds, lore.AllKinds has %d", len(loreKinds), len(canonical))
+	}
+	d := defaults()
+	for _, k := range canonical {
+		if !loreKinds[string(k)] {
+			t.Errorf("loreKinds missing canonical kind %q", k)
+		}
+		if _, ok := d.Inscribe.ValidDays[string(k)]; !ok {
+			t.Errorf("defaults().Inscribe.ValidDays missing canonical kind %q", k)
+		}
+	}
+}
+
+// TestFileLayerValidDaysPartialOverride verifies per-key merge: a file
+// that sets only research must not clobber the other kinds' defaults or
+// the sibling [inscribe] keys.
+func TestFileLayerValidDaysPartialOverride(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	content := "[inscribe.valid_days]\nresearch = 7\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if got := cfg.Inscribe.ValidDays["research"]; got != 7 {
+		t.Errorf("research: got %d want 7", got)
+	}
+	if got := cfg.Inscribe.ValidDays["decision"]; got != 180 {
+		t.Errorf("decision should keep default 180, got %d", got)
+	}
+	if got := cfg.Inscribe.ValidDays["idea"]; got != 0 {
+		t.Errorf("idea should keep default 0, got %d", got)
+	}
+	if cfg.Inscribe.PrincipleMaxWords != 60 {
+		t.Errorf("principle_max_words should keep default 60, got %d", cfg.Inscribe.PrincipleMaxWords)
+	}
+}
+
+// TestFileLayerValidDaysZeroMeansNeverStale verifies an explicit 0 is a
+// valid override (never stale), distinct from "key absent".
+func TestFileLayerValidDaysZeroMeansNeverStale(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	content := "[inscribe.valid_days]\ndecision = 0\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	if err := fileLayer(p, &cfg); err != nil {
+		t.Fatalf("fileLayer: %v", err)
+	}
+	if got := cfg.Inscribe.ValidDays["decision"]; got != 0 {
+		t.Errorf("decision: got %d want 0 (never stale)", got)
+	}
+}
+
+// TestFileLayerValidDaysUnknownKind verifies an unrecognized kind key
+// fails the load with an error naming the bad key.
+func TestFileLayerValidDaysUnknownKind(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	content := "[inscribe.valid_days]\nreasearch = 7\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	err := fileLayer(p, &cfg)
+	if err == nil {
+		t.Fatal("unknown kind should fail config load")
+	}
+	if !strings.Contains(err.Error(), `unknown kind "reasearch"`) {
+		t.Errorf("error should name the bad key, got: %v", err)
+	}
+}
+
+// TestFileLayerValidDaysNegative verifies a negative window fails the
+// load with an error naming the bad key and value.
+func TestFileLayerValidDaysNegative(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "config.toml")
+	content := "[inscribe.valid_days]\nresearch = -1\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults()
+	err := fileLayer(p, &cfg)
+	if err == nil {
+		t.Fatal("negative valid_days should fail config load")
+	}
+	if !strings.Contains(err.Error(), "research = -1") {
+		t.Errorf("error should name the bad key/value, got: %v", err)
+	}
+}
+
+// TestLoadValidDaysLayerPrecedence is the layer-precedence spec for the
+// valid_days knob: per-project config beats user-wide config per key,
+// while keys set only in the user-wide file survive, and untouched
+// kinds stay at built-in defaults.
+func TestLoadValidDaysLayerPrecedence(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+
+	// Layer 2: user-wide config sets research=10 and decision=200.
+	userGuildDir := filepath.Join(home, ".guild")
+	if err := os.MkdirAll(userGuildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userGuildDir, "config.toml"),
+		[]byte("[inscribe.valid_days]\nresearch = 10\ndecision = 200\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Layer 3: per-project config overrides only research.
+	writeTOML(t, repo, "[inscribe.valid_days]\nresearch = 3\n")
+
+	t.Setenv("HOME", home)
+	t.Setenv("GUILD_PROJECT", "")
+	t.Setenv("GUILD_NO_USAGE_LOG", "")
+	t.Setenv("GUILD_NO_EMOJI", "")
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Inscribe.ValidDays["research"]; got != 3 {
+		t.Errorf("research (repo=3 beats user=10): got %d", got)
+	}
+	if got := cfg.Inscribe.ValidDays["decision"]; got != 200 {
+		t.Errorf("decision (user=200 survives repo layer): got %d", got)
+	}
+	if got := cfg.Inscribe.ValidDays["idea"]; got != 0 {
+		t.Errorf("idea (untouched default=0): got %d", got)
+	}
+	if got := cfg.Inscribe.ValidDays["principle"]; got != 0 {
+		t.Errorf("principle (untouched default=0): got %d", got)
 	}
 }

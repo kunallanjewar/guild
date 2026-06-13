@@ -135,6 +135,26 @@ type Deps struct {
 	// See internal/lore/embed_deps.go for the port definition and
 	// QUEST-213 for the wiring rationale.
 	Embed any
+	// LoreValidDays, when non-nil, returns the merged per-kind
+	// valid_days windows from config ([inscribe.valid_days]): kind name
+	// to window in days, 0 meaning "never stale". Adapters wire a
+	// closure over config.Load; the field stays a plain map-returning
+	// func so neither this package nor internal/lore below it imports
+	// internal/config. Called lazily at handler invocation time, so the
+	// long-lived MCP server observes config edits without a restart and
+	// CLI verbs that never inscribe pay no config read. A nil func or
+	// nil map falls back to the built-in kind defaults in internal/lore.
+	LoreValidDays func() map[string]int
+}
+
+// ResolveLoreValidDays returns the configured per-kind valid_days
+// windows, or nil when no provider is wired (the built-in kind defaults
+// apply downstream).
+func (d Deps) ResolveLoreValidDays() map[string]int {
+	if d.LoreValidDays == nil {
+		return nil
+	}
+	return d.LoreValidDays()
 }
 
 // Registrant is the erased-handle interface that lets a heterogeneous

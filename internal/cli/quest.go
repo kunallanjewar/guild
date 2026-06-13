@@ -242,6 +242,9 @@ func buildCLICommandDeps() command.Deps {
 		},
 		Now:        time.Now,
 		OpenLoreDB: openLoreDB,
+		// quest post --spec inscribes a kind=decision lore entry, so the
+		// quest surface needs the configured decay windows too.
+		LoreValidDays: cliLoreValidDays,
 	}
 	// command.Deps.Embed is `any`; assigning a typed-nil pointer would
 	// produce a non-nil interface value and defeat questEmbedFromDeps's

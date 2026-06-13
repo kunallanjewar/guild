@@ -582,7 +582,8 @@ func buildCLILoreDeps() command.Deps {
 			}
 			return p.ID, nil
 		},
-		Now: time.Now,
+		Now:           time.Now,
+		LoreValidDays: cliLoreValidDays,
 	}
 	// command.Deps.Embed is `any`; setting it to a typed-nil pointer
 	// would become a non-nil interface. Assign only when the wiring
@@ -591,6 +592,21 @@ func buildCLILoreDeps() command.Deps {
 		d.Embed = e
 	}
 	return d
+}
+
+// cliLoreValidDays surfaces the merged [inscribe.valid_days] windows to
+// lore write verbs via command.Deps.LoreValidDays. Evaluated lazily at
+// handler invocation time, NOT at init() when the Deps bundle is built,
+// so a HOME swapped by tests and config edits between invocations are
+// both observed. Load errors fall back to nil (built-in kind defaults):
+// config problems surface on the verbs that check Load's error rather
+// than by blocking a write.
+func cliLoreValidDays() map[string]int {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return nil
+	}
+	return cfg.Inscribe.ValidDays
 }
 
 // wireCLIEmbedDeps opens lore.db once at CLI Deps construction time
