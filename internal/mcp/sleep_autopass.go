@@ -31,7 +31,7 @@ import (
 //     mutation and steps gate through the HYBRID policy, so a daemon pass
 //     and an autopass touching the same DB converge on additive writes.
 //
-// Gating, in the order the spec (LORE-646) lists:
+// Gating, in the order the design spec lists:
 //
 //	(a) sleep enabled in config and GUILD_NO_SLEEP unset (config.Load
 //	    folds both into Sleep.Enabled);
