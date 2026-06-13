@@ -178,11 +178,57 @@ type Config struct {
 	Telemetry TelemetryConfig `toml:"telemetry"`
 	Daemon    DaemonConfig    `toml:"daemon"`
 	Sleep     SleepConfig     `toml:"sleep"`
+
+	// Modules is the [modules] toggle table (ADR-006 Phase 3): a map from
+	// a capability module's Name() to an explicit on/off bit. A key absent
+	// from the map means "use the module's own DefaultEnabled()"; a present
+	// key overrides it in either direction. The map is the merged result of
+	// (in precedence order) a [profile] preset baseline, the [modules] file
+	// keys, GUILD_MODULE_<NAME> / GUILD_NO_<NAME> env, and --module /
+	// --no-<name> flags. Empty by default so a silent config leaves every
+	// module on its own default, the byte-identical pre-Phase-3 behavior.
+	// Resolve a final verdict through ModuleEnabled, never by reading this
+	// map directly.
+	Modules ModulesConfig `toml:"modules"`
+
+	// Profile carries the [profile] preset name (ADR-006 Phase 3). A
+	// preset expands into a Modules baseline BEFORE the file/env/flag
+	// layers apply, so an explicit [modules] key always wins over the
+	// preset it sits inside. Empty means no preset (every module on its
+	// own default).
+	Profile ProfileConfig `toml:"profile"`
+}
+
+// ModulesConfig is the [modules] toggle table: module name to explicit
+// enabled bit. Decoded directly from TOML (a table of booleans) and also
+// the merge target for the preset, env, and flag layers.
+type ModulesConfig map[string]bool
+
+// ProfileConfig is the [profile] section. Today it carries only the
+// preset name; future profile-scoped knobs (default backends, etc.) land
+// here alongside it.
+type ProfileConfig struct {
+	// Preset names a bundle of module toggles expanded into Modules before
+	// lower layers apply. See presets.go for the registry. An unknown name
+	// fails config load (a typo must be loud, not silently ignored).
+	Preset string `toml:"preset"`
 }
 
 // defaults returns a Config populated with the built-in baseline values.
 // All other layers in Load apply deltas on top of this.
 func defaults() Config {
+	cfg := baseDefaults()
+	// Seed every registered module's built-in config values before any
+	// file layer applies, so a partial override keeps the module's
+	// defaults for absent keys (ADR-006 Phase 3).
+	applyModuleDefaults(&cfg)
+	return cfg
+}
+
+// baseDefaults holds the kernel's built-in baseline. Split from defaults()
+// so module-default seeding has a clean target and tests can compare
+// against the pure kernel baseline.
+func baseDefaults() Config {
 	return Config{
 		Scoring: ScoringConfig{
 			WFTS:            0.7,

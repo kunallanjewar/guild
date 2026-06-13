@@ -68,6 +68,16 @@ func fileLayer(path string, dst *Config) error {
 		return fmt.Errorf("config: parse %s: %w", path, err)
 	}
 
+	// Also decode the file into a generic map so registered module mergers
+	// can read their own [<name>] subsection without internal/config
+	// hand-coding a field for it. The Config-typed decode above ignores
+	// keys with no matching struct field, so a module section is only
+	// visible through this raw view.
+	var rawTable map[string]any
+	if _, err := toml.Decode(string(raw), &rawTable); err != nil {
+		return fmt.Errorf("config: parse %s: %w", path, err)
+	}
+
 	// Apply only the keys that were present in this file.
 	if md.IsDefined("project") {
 		dst.Project = tmp.Project
@@ -130,6 +140,18 @@ func fileLayer(path string, dst *Config) error {
 	}
 	if md.IsDefined("sleep", "pass_budget_seconds") {
 		dst.Sleep.PassBudgetSeconds = tmp.Sleep.PassBudgetSeconds
+	}
+	if md.IsDefined("profile", "preset") {
+		dst.Profile.Preset = tmp.Profile.Preset
+	}
+	// [modules] toggle table (ADR-006 Phase 3): per-key merge so a toggle
+	// absent from THIS file keeps the value a lower layer set.
+	mergeModulesTable(md, tmp.Modules, dst)
+	// Registered per-module config sections (ADR-006 Phase 3): each module
+	// merges its own [<name>] subsection with per-key granularity, so
+	// fileLayer no longer grows a hand-coded branch per module key.
+	if err := applyModuleConfigLayers(md, rawTable, path, dst); err != nil {
+		return err
 	}
 	return nil
 }
@@ -200,6 +222,9 @@ func envLayer(dst *Config) {
 	if parseBoolEnv("GUILD_NO_WATCH") {
 		dst.Daemon.Watch = false
 	}
+	// Module toggles (ADR-006 Phase 3): GUILD_MODULE_<NAME>=0/1 and
+	// GUILD_NO_<NAME>=1, following the established GUILD_NO_* convention.
+	envModuleOverrides(dst)
 }
 
 // parseBoolEnv returns true for env values "1", "true", "yes" (case-insensitive).
@@ -238,6 +263,9 @@ func flagLayer(flags *pflag.FlagSet, dst *Config) {
 	applyDisableFlag(flags, "no-daemon", &dst.Daemon.Autostart)
 	applyFloat64Flag(flags, "w-fts", &dst.Scoring.WFTS)
 	applyFloat64Flag(flags, "w-recency", &dst.Scoring.WRecency)
+	// Module toggles (ADR-006 Phase 3): --module name=bool (repeatable)
+	// and --disable-module name (repeatable), highest precedence.
+	flagModuleOverrides(flags, dst)
 }
 
 // applyStringFlag copies a flag value into dst only when the flag is
@@ -326,6 +354,16 @@ func Load(flags *pflag.FlagSet) (*Config, error) {
 
 	// Layer 5 — CLI flags (highest precedence).
 	flagLayer(flags, &cfg)
+
+	// Preset expansion (ADR-006 Phase 3, [profile] preset). Applied last
+	// but with BASELINE-ONLY semantics: it fills a module toggle the file,
+	// env, or flag layers did not already set, so every explicitly-set
+	// [modules] key (or GUILD_MODULE_* / --module override) still wins over
+	// the preset it sits inside. The preset name itself is resolved from
+	// the same merged Profile.Preset every layer can influence.
+	if err := applyPreset(cfg.Profile.Preset, &cfg); err != nil {
+		return nil, err
+	}
 
 	// Reconcile convenience booleans: if any layer set NoUsageLog=true,
 	// keep Telemetry.UsageLog consistent (the canonical storage for

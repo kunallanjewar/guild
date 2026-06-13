@@ -197,6 +197,18 @@ func init() {
 	rootCmd.PersistentFlags().Bool("agent", false,
 		"machine-readable JSON output for coding agents (auto-detected; --agent=false forces human output)")
 
+	// --module / --disable-module are the CLI flag layer for ADR-006
+	// Phase 3 capability-module toggles. config.flagLayer reads both from
+	// the merged FlagSet, so declaring them as persistent globals makes
+	// them available to every subcommand. --module NAME=BOOL is the
+	// explicit toggle (repeatable); --disable-module NAME forces a module
+	// off (repeatable), mirroring --no-daemon. The env equivalents are
+	// GUILD_MODULE_<NAME> and GUILD_NO_<NAME> (wired in config.envLayer).
+	rootCmd.PersistentFlags().StringArray("module", nil,
+		"toggle a capability module: --module NAME=true|false (repeatable)")
+	rootCmd.PersistentFlags().StringArray("disable-module", nil,
+		"disable a capability module by name (repeatable)")
+
 	// --version retains its long spelling. Its short flag is -V so that
 	// -v stays reserved for --verbose (see above). `guild version` (the
 	// subcommand) is the portable form that works everywhere.
