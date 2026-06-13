@@ -88,9 +88,12 @@ type Status struct {
 //
 //	{"guild_shim":{"version":"v0.3.2","cwd":"/path/to/project","pid":12345}}
 //	{"guild_status_request":{}}
+//
+// omitempty keeps the marshaled form (the shim's outbound preamble)
+// down to exactly the one key that is present.
 type preamble struct {
-	Shim          *ShimPreamble `json:"guild_shim"`
-	StatusRequest *struct{}     `json:"guild_status_request"`
+	Shim          *ShimPreamble `json:"guild_shim,omitempty"`
+	StatusRequest *struct{}     `json:"guild_status_request,omitempty"`
 }
 
 // readPreamble consumes the first newline-terminated line from br and

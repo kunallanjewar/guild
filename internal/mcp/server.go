@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -217,6 +219,45 @@ func Serve(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ServeIO runs the guild MCP server over explicit byte streams instead
+// of process stdio. It is the in-process continuation path for the
+// daemon shim (daemon.ShimConfig.Fallback): when the daemon dies
+// mid-session and the one re-dial fails, the shim replays the retained
+// handshake frames at the head of r and hands the session here so the
+// harness keeps a working server without respawning. Construction
+// matches Serve exactly (stale-session cleanup, dynamic INSTRUCTIONS,
+// per-process session identity); only the transport differs.
+//
+// EOF on r is the peer hanging up: a clean session end, not an error,
+// mirroring DaemonHost.ServeSession's treatment of the same condition.
+func ServeIO(ctx context.Context, r io.Reader, w io.Writer) error {
+	log := newLogger()
+
+	if err := session.CleanupStale(ctx); err != nil {
+		log.Warn("stale session cleanup failed (non-fatal)", "err", err)
+	}
+
+	s, err := buildWithContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := s.Run(ctx, &sdkmcp.IOTransport{Reader: io.NopCloser(r), Writer: nopWriteCloser{w}}); err != nil {
+		if ctx.Err() != nil || errors.Is(err, io.EOF) {
+			return nil
+		}
+		return fmt.Errorf("mcp: serve: %w", err)
+	}
+	return nil
+}
+
+// nopWriteCloser adapts an io.Writer to the io.WriteCloser the SDK's
+// IOTransport requires. Close is a no-op: the shim owns the lifetime
+// of the underlying stdout stream.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 // BuildForDocs returns a fully constructed MCP server for doc generation.
 // cmd/docgen uses it to render docs/generated/mcp.md.
