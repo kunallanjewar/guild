@@ -69,7 +69,7 @@ func (questModule) Commands() []command.Registrant {
 // applying migrations at DB-open time via storage.Migrate(ctx, db,
 // "quest"); wiring a startup module-migration loop and physically splitting
 // the corpus per database is a deferred Phase 2 follow-up.
-func (questModule) Migrations() (fs.FS, string) {
+func (questModule) Migrations() (fsys fs.FS, dbName string) {
 	return storage.DefaultMigrationFS(), "quest"
 }
 

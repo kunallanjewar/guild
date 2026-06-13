@@ -38,7 +38,7 @@ func (sessionModule) DefaultEnabled() bool { return true }
 func (sessionModule) Commands() []command.Registrant { return nil }
 
 // Migrations returns (nil, "") because session owns no SQLite database.
-func (sessionModule) Migrations() (fs.FS, string) { return nil, "" }
+func (sessionModule) Migrations() (fsys fs.FS, dbName string) { return nil, "" }
 
 // Services returns nil: session daemon loops move to module Services in
 // Phase 3.

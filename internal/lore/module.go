@@ -63,7 +63,7 @@ func (loreModule) Commands() []command.Registrant {
 // shared corpus stays shared (avoiding upgrade risk for existing installs)
 // and this only records that lore owns the "lore" database. The kernel keeps
 // applying migrations at DB-open time via storage.Migrate(ctx, db, "lore").
-func (loreModule) Migrations() (fs.FS, string) {
+func (loreModule) Migrations() (fsys fs.FS, dbName string) {
 	return storage.DefaultMigrationFS(), "lore"
 }
 
