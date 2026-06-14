@@ -203,8 +203,22 @@ func (c *serverCore) mcpDepsForModule(name string) (command.Deps, bool) {
 		return c.buildMCPCommandDeps(), true
 	case "eval":
 		return c.buildMCPEvalDeps(), true
-	default:
+	case "session":
+		// session's bootstrap tools are hand-wired in registerBootstrap.
 		return command.Deps{}, false
+	default:
+		// A non-core enabled module (e.g. compression) whose verbs need no
+		// database. Bind with a minimal Deps: project resolution + clock +
+		// telemetry, but no DB openers, since its handlers never call OpenDB.
+		// This branch is only reached for an enabled module, so a disabled
+		// compression module contributes no MCP tools and the default tool
+		// list stays byte-identical.
+		return command.Deps{
+			ResolveProj:      c.resolveProjectAutoBootstrap,
+			Now:              time.Now,
+			RecordTelemetry:  c.recordMCPTelemetry,
+			PrependNarration: true,
+		}, true
 	}
 }
 
