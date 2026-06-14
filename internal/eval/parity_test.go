@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -64,7 +65,7 @@ func TestParity_EmbeddedMatchesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	if string(raw) != string(goldenFixture) {
+	if !bytes.Equal(raw, goldenFixture) {
 		t.Fatalf("embedded golden differs from %s; rebuild after regenerating the fixture", goldenRelPath)
 	}
 }
