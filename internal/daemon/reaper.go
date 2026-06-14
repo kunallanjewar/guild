@@ -104,6 +104,13 @@ type Reaper struct {
 	// can see at a glance how many crashed agents' claims the daemon has
 	// returned to the board.
 	totalForfeited atomic.Int64
+
+	// onSwept, when non-nil, is called at the very end of sweep() (after the
+	// forfeit tally and the decision record). It is a test-only barrier seam:
+	// a test can synchronize on a sweep being fully complete without driving a
+	// second "barrier" tick that would race in an extra sweep. Nil in
+	// production, so the live sweep path is unchanged.
+	onSwept func()
 }
 
 // NewReaper validates cfg and returns a runnable Reaper.
@@ -157,6 +164,12 @@ func (r *Reaper) Run(ctx context.Context) {
 // failure). A sweep that forfeited or cleared anything logs a summary line;
 // an empty sweep stays quiet so a healthy idle daemon does not spam its log.
 func (r *Reaper) sweep(ctx context.Context) {
+	// Signal sweep completion to a test barrier, if one is installed, on every
+	// return path. Nil in production. This lets a test wait for the sweep to
+	// finish (tally added, decision recorded) without a stray second tick.
+	if r.onSwept != nil {
+		defer r.onSwept()
+	}
 	if r.cfg.Reap == nil {
 		return
 	}
