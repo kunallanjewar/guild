@@ -166,11 +166,44 @@ func (r *Reaper) sweep(ctx context.Context) {
 			return
 		}
 		r.logger.Warn("daemon: lease reap sweep failed; will retry next tick", "err", err.Error())
+		// Record the failed sweep so an operator can see reap errors in the
+		// event stream (ADR-006 Phase 5). No-op unless a recorder is wired.
+		recordDecision(Decision{
+			Kind:   DecisionLeaseReap,
+			Allow:  false,
+			Reason: "sweep_error",
+			At:     r.clk.Now(),
+			Inputs: map[string]bool{"swept": true, "errored": true, "forfeited_any": false},
+		})
 		return
 	}
 	if out.Forfeited > 0 {
 		r.totalForfeited.Add(int64(out.Forfeited))
 	}
+	// Record the sweep decision (ADR-006 Phase 5). This does NOT change what
+	// the sweep did: the ReapFunc already ran and out is its result; we only
+	// snapshot it. The gate's Allow is "did this sweep forfeit anything",
+	// the actionable signal. Recording is a no-op unless the observability
+	// module installed a recorder, so the disabled path is byte-identical.
+	recordDecision(Decision{
+		Kind:   DecisionLeaseReap,
+		Allow:  out.Forfeited > 0,
+		Reason: reapReason(out),
+		At:     r.clk.Now(),
+		Inputs: map[string]bool{
+			"swept":           true,
+			"errored":         false,
+			"forfeited_any":   out.Forfeited > 0,
+			"skipped_live":    out.SkippedLive > 0,
+			"orphans_cleared": out.OrphansCleared > 0,
+		},
+		Metrics: map[string]int{
+			"scanned":         out.Scanned,
+			"forfeited":       out.Forfeited,
+			"skipped_live":    out.SkippedLive,
+			"orphans_cleared": out.OrphansCleared,
+		},
+	})
 	if out.Forfeited > 0 || out.OrphansCleared > 0 {
 		r.logger.Info("daemon: lease reaper swept",
 			"scanned", out.Scanned,
@@ -187,4 +220,20 @@ func (r *Reaper) sweep(ctx context.Context) {
 // status-request goroutine reads it while the sweep goroutine writes it.
 func (r *Reaper) TotalForfeited() int64 {
 	return r.totalForfeited.Load()
+}
+
+// reapReason summarizes a successful sweep's outcome for the decision
+// record's human-readable reason. It only describes what the sweep already
+// did; it never affects the sweep.
+func reapReason(out ReapOutcome) string {
+	switch {
+	case out.Forfeited > 0:
+		return "forfeited_zombie_claims"
+	case out.OrphansCleared > 0:
+		return "cleared_orphans_only"
+	case out.SkippedLive > 0:
+		return "all_expired_live"
+	default:
+		return "nothing_to_reap"
+	}
 }
