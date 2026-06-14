@@ -113,6 +113,9 @@ func (c *container) openSession(ctx context.Context, t *testing.T) *mcpSession {
 	if suite.mode != modeDaemon {
 		args = append(args, "-e", "GUILD_NO_DAEMON=1")
 	}
+	// Container-scoped extra env (e.g. GUILD_MODULE_LORE=0 for the
+	// module-toggle proof). Empty for the golden scenarios.
+	args = append(args, c.extraEnvArgs()...)
 	args = append(args, c.name, "guild", "mcp", "serve")
 
 	//nolint:gosec // argv is harness-controlled

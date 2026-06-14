@@ -27,6 +27,22 @@ const projectDir = "/home/guild/e2eproj"
 type container struct {
 	name  string
 	image string
+	// env are extra KEY=VALUE pairs injected as `-e` flags into every
+	// docker exec for this container (CLI calls, MCP sessions, daemon
+	// start). Empty for the golden scenarios, which must stay
+	// byte-identical; the module-toggle proof sets GUILD_MODULE_LORE=0
+	// here so every surface in that container sees the disable.
+	env []string
+}
+
+// extraEnvArgs returns the `-e KEY=VALUE` argv fragment for the
+// container's configured env, in declaration order.
+func (c *container) extraEnvArgs() []string {
+	args := make([]string, 0, len(c.env)*2)
+	for _, kv := range c.env {
+		args = append(args, "-e", kv)
+	}
+	return args
 }
 
 // startContainer launches a fresh scenario container and registers
@@ -74,12 +90,14 @@ func startContainer(ctx context.Context, t *testing.T) *container {
 // output. Fails t on a non-zero exit.
 func (c *container) guild(ctx context.Context, t *testing.T, args ...string) string {
 	t.Helper()
-	argv := append([]string{
+	argv := []string{
 		"exec",
 		"-w", projectDir,
 		"-e", "GUILD_NO_UPDATE_CHECK=1",
-		c.name, "guild",
-	}, args...)
+	}
+	argv = append(argv, c.extraEnvArgs()...)
+	argv = append(argv, c.name, "guild")
+	argv = append(argv, args...)
 	out, err := dockerCombined(ctx, argv...)
 	if err != nil {
 		t.Fatalf("guild %v in %s: %v\n%s", args, c.name, err, out)
@@ -120,9 +138,10 @@ func (c *container) startDaemon(ctx context.Context, t *testing.T) {
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		out, err := dockerCombined(ctx,
-			"exec", "-w", projectDir, "-e", "GUILD_NO_UPDATE_CHECK=1",
-			c.name, "guild", "daemon", "status")
+		statusArgs := []string{"exec", "-w", projectDir, "-e", "GUILD_NO_UPDATE_CHECK=1"}
+		statusArgs = append(statusArgs, c.extraEnvArgs()...)
+		statusArgs = append(statusArgs, c.name, "guild", "daemon", "status")
+		out, err := dockerCombined(ctx, statusArgs...)
 		if err == nil {
 			return // exit 0 → running
 		}

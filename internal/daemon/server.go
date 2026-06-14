@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mathomhaus/guild/internal/module"
 )
 
 // ErrAlreadyRunning is returned by [Server.Run] when the startup probe
@@ -109,6 +111,18 @@ type Config struct {
 	// without ever reaping; lapsed leases then linger until something else
 	// (a re-accept, a manual forfeit) clears them.
 	Reaper *Reaper
+
+	// Services are background loops contributed by enabled capability
+	// modules (ADR-006 Phase 3). Run starts each on boot and stops each on
+	// shutdown, alongside the built-in scheduler/pipeline/registry/reaper
+	// loops, via the uniform Service registry (see service.go). Empty today
+	// (no shipped module contributes a loop), so daemon startup is
+	// byte-identical to the pre-Phase-3 ladder; the field exists so a
+	// future module's loop joins the daemon automatically. The built-in
+	// loops keep their own typed fields above because the status surface
+	// reads them (Touch, watchStatus, Snapshot, TotalForfeited); only their
+	// start/stop is generalized.
+	Services []module.Service
 
 	// Logger receives the daemon's structured stderr log lines. Nil
 	// falls back to slog.Default(). Never log to stdout: the daemon
@@ -226,59 +240,22 @@ func (s *Server) Run(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 
-	// ── idle dream-pass scheduler (ADR-005 Phase 2) ──────────────────
-	// The scheduler shares connCtx so daemon shutdown cancels its loop
-	// (and any in-flight pass) alongside the connections. It is the only
-	// goroutine started here besides the accept loop; a nil Scheduler
-	// keeps the minimal Phase 1 behavior (serve, never dream).
-	if s.cfg.Scheduler != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.cfg.Scheduler.Run(connCtx)
-		}()
-	}
-
-	// ── watch -> staleness -> renewal pipeline (ADR-005 Phase 4) ─────
-	// Shares connCtx so daemon shutdown cancels the watcher loop (and
-	// closes its OS watches) alongside the connections. A nil or disabled
-	// Pipeline keeps the daemon serving without ever watching; a watcher
-	// failure inside Run degrades to not-watching without taking the
-	// daemon down (see pipeline.go).
-	if s.cfg.Pipeline != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.cfg.Pipeline.Run(connCtx)
-		}()
-	}
-
-	// ── session registry + lease-heartbeat tick (ADR-005 Phase 3) ────
-	// Shares connCtx so daemon shutdown cancels the tick alongside the
-	// connections. A nil Registry keeps the daemon serving without ever
-	// heartbeating; leases then rely on their TTL alone. The registry
-	// renews all pre-existing leases once on boot before any reaper could
-	// run, then heartbeats live sessions on its interval (see sessions.go).
-	if s.cfg.Registry != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.cfg.Registry.Run(connCtx)
-		}()
-	}
-
-	// ── lease reaper (ADR-005 Phase 3) ───────────────────────────────
-	// Shares connCtx so daemon shutdown cancels the sweep tick alongside
-	// the connections. A nil Reaper keeps the daemon serving without ever
-	// forfeiting a lapsed lease; the work then waits for a re-accept or a
-	// manual forfeit. It runs in its own goroutine and never blocks the
-	// accept loop (see reaper.go).
-	if s.cfg.Reaper != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.cfg.Reaper.Run(connCtx)
-		}()
+	// ── background service loops (ADR-006 Phase 3 service registry) ──────
+	// The fixed `if cfg.X != nil { go ... }` ladder for the idle scheduler
+	// (ADR-005 Phase 2), the watch -> staleness -> renewal pipeline (Phase
+	// 4), the session/lease registry and the lease reaper (Phase 3) is now
+	// a single range over the uniform Service list collectServices builds,
+	// plus any loop an enabled capability module contributes (cfg.Services).
+	// Every loop shares connCtx, so daemon shutdown cancels them alongside
+	// the connections, byte-identical to the per-loop ladder; the built-in
+	// loops keep their historical start order (scheduler, pipeline,
+	// registry, reaper) so startup behavior does not move. Each service's
+	// Start spawns its own goroutine; the daemon Stops each on shutdown.
+	services := s.collectServices()
+	for _, svc := range services {
+		if err := svc.Start(connCtx); err != nil {
+			s.log.Warn("daemon: service failed to start", "service", svc.Name(), "err", err)
+		}
 	}
 
 	acceptErr := make(chan error, 1)
@@ -306,12 +283,44 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	_ = ln.Close() // unlinks the socket; pending Accept returns
-	cancelConns()  // sessions observe cancellation through the SDK
+	cancelConns()  // sessions + service loops observe cancellation
+
+	// Stop each background service: connCtx is already cancelled, so each
+	// loop is winding down; Stop joins its goroutine, bounded by the same
+	// shutdownIdleTimeout the connection wait uses so a loop ignoring
+	// cancellation cannot wedge shutdown forever.
+	s.stopServices(services)
+
 	waitWithTimeout(&wg, shutdownIdleTimeout, s.log)
 	s.removeArtifacts(socketPath)
 
 	s.log.Info("daemon: stopped", "pid", os.Getpid())
 	return runErr
+}
+
+// stopServices stops every background service, bounding the total drain by
+// shutdownIdleTimeout and logging any loop that does not return in time.
+// The services' Start ctx (connCtx) is already cancelled when this runs,
+// so each loop should be returning; Stop only joins it.
+//
+// The drain ctx is deliberately detached from any caller ctx
+// (context.Background with a fresh timeout): shutdown is reached precisely
+// because the run ctx was cancelled, so deriving the drain deadline from
+// it would expire instantly and defeat the bounded join. Same rationale as
+// waitWithTimeout's wall-clock bound.
+//
+//nolint:contextcheck // drain deadline must outlive the already-cancelled run ctx
+func (s *Server) stopServices(services []module.Service) {
+	if len(services) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownIdleTimeout)
+	defer cancel()
+	for _, svc := range services {
+		if err := svc.Stop(ctx); err != nil {
+			s.log.Warn("daemon: service did not stop cleanly", "service", svc.Name(), "err", err)
+		}
+	}
 }
 
 // serveConn handles one accepted connection end to end: preamble,

@@ -183,6 +183,17 @@ func RegisterExec[I, O any](r *ExecRegistry, c *Command[I, O], deps DepsBuilder)
 	r.entries[c.Name] = execEntry{deps: deps, run: execAdapter(c)}
 }
 
+// BindExec registers this command on r with its Deps builder, the
+// type-erased equivalent of RegisterExec. It exists so a caller holding a
+// []Registrant (the ADR-006 module loop) can build the daemon-side exec
+// dispatch table from a module's Commands() without recovering each
+// command's concrete generic type. Behavior is identical to RegisterExec,
+// including the exec-exemption skip, because both route through the same
+// execAdapter closure.
+func (c *Command[I, O]) BindExec(r *ExecRegistry, deps DepsBuilder) {
+	RegisterExec(r, c, deps)
+}
+
 // Names returns the registered wire names, sorted. Test/diagnostic use.
 func (r *ExecRegistry) Names() []string {
 	names := make([]string, 0, len(r.entries))

@@ -392,7 +392,15 @@ func resolveInstructionsFor(ctx context.Context, logger *slog.Logger, store Sess
 	// Measurement hook (QUEST-57): log built INSTRUCTIONS length and
 	// principle count at debug level so operators can quantify actual
 	// per-session cost post-ship. Enable with GUILD_MCP_LOG_LEVEL=debug.
-	principleCount := strings.Count(instructions[len(staticInstructions):], "\n- ")
+	// Count list items in the appended oath-wall section only; locate it by
+	// its header rather than slicing at len(staticInstructions), which no
+	// longer holds once a disabled module's fragment is excluded (ADR-006
+	// Phase 3 — the all-on contract is unchanged, but the contract may be
+	// shorter than the embedded source when a module is off).
+	principleCount := 0
+	if i := strings.Index(instructions, "## Active Principles (oath wall)"); i >= 0 {
+		principleCount = strings.Count(instructions[i:], "\n- ")
+	}
 	logger.Debug("mcp: instructions: built dynamic INSTRUCTIONS",
 		"project", project,
 		"instructions_bytes", len(instructions),

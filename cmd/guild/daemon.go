@@ -17,6 +17,7 @@ import (
 	"github.com/mathomhaus/guild/internal/config"
 	"github.com/mathomhaus/guild/internal/daemon"
 	"github.com/mathomhaus/guild/internal/mcp"
+	"github.com/mathomhaus/guild/internal/module"
 )
 
 // wireDaemonRun wires the `guild daemon run` cobra RunE onto
@@ -94,7 +95,14 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		// zombie claim behind any lapsed lease); the daemon Server drives
 		// its sweep tick for the daemon's lifetime.
 		Reaper: host.Reaper(),
-		Logger: host.Logger(),
+		// Module-contributed background loops (ADR-006 Phase 3): every
+		// enabled capability module's Services() join the daemon's uniform
+		// service registry alongside the built-in loops above. Empty today
+		// (no shipped module ships a loop), so daemon behavior is
+		// unchanged; a disabled module contributes nothing because
+		// module.Enabled drops it before Services() is consulted.
+		Services: enabledModuleServices(cfg),
+		Logger:   host.Logger(),
 	})
 	if err != nil {
 		return fmt.Errorf("daemon run: %w", err)
@@ -104,6 +112,22 @@ func runDaemonRun(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("daemon run: %w", err)
 	}
 	return nil
+}
+
+// enabledModuleServices returns the daemon background loops contributed
+// by every enabled capability module (ADR-006 Phase 3). It walks the
+// module registry under the same config-backed predicate the MCP and CLI
+// surfaces use, so a module disabled via [modules] / GUILD_MODULE_* never
+// has its loops started. A nil cfg (config-load failure) means every
+// module on its own default, matching the degrade posture elsewhere. No
+// shipped core module returns a Service today, so this is an empty slice
+// on the default path and daemon startup is byte-identical.
+func enabledModuleServices(cfg *config.Config) []module.Service {
+	var svcs []module.Service
+	for _, m := range module.Enabled(config.ModuleEnabled(cfg)) {
+		svcs = append(svcs, m.Services()...)
+	}
+	return svcs
 }
 
 // loadDaemonConfig loads the merged config for the daemon's background

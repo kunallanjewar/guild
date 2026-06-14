@@ -27,6 +27,22 @@ func loreValidDaysFromConfig() map[string]int {
 	return cfg.Inscribe.ValidDays
 }
 
+// moduleEnabledPredicate loads the merged config and returns the
+// predicate module.Enabled consults to decide which modules wire their
+// tools onto the MCP surface (ADR-006 Phase 3). On a config-load failure
+// it returns nil, which module.Enabled treats as "every module on its own
+// DefaultEnabled()" — a broken config file must never silently strip the
+// core tools, matching the swallow-and-degrade posture of
+// loreValidDaysFromConfig above. Called once per server construction, so
+// a long-lived MCP server reflects the config present at connect time.
+func moduleEnabledPredicate() func(name string, def bool) bool {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return nil
+	}
+	return config.ModuleEnabled(cfg)
+}
+
 // Register wires every guild tool onto s against a default per-process
 // core: per-PID session identity plus a fresh provider bundle, exactly
 // what the stdio server runs with. Hosts that need injectable seams
@@ -143,11 +159,15 @@ func (c *serverCore) registerBootstrap(s *sdkmcp.Server) {
 // alphabetically, so the advertised surface is byte-identical regardless of
 // bind order.
 //
-// module.Enabled(nil) treats every registered module as enabled per its own
-// DefaultEnabled() — the Phase 2 default set (quest+lore+session). Config
-// drives Enabled in Phase 3.
+// ADR-006 Phase 3: module.Enabled is now driven by the config-backed
+// predicate (moduleEnabledPredicate), so a [modules] toggle, a
+// GUILD_MODULE_<NAME> / GUILD_NO_<NAME> env override, or a --module flag
+// removes a disabled module's tools from the surface entirely. With a
+// silent config every module stays on its own DefaultEnabled() (the
+// quest+lore+session default set), byte-identical to the Phase 2 nil
+// predicate.
 func (c *serverCore) registerAlwaysOn(s *sdkmcp.Server) {
-	for _, m := range module.Enabled(nil) {
+	for _, m := range module.Enabled(moduleEnabledPredicate()) {
 		deps, ok := c.mcpDepsForModule(m.Name())
 		if !ok {
 			// A module with no MCP-side Deps bundle contributes no MCP

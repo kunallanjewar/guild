@@ -6,9 +6,28 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mathomhaus/guild/internal/command"
+	"github.com/mathomhaus/guild/internal/config"
 	"github.com/mathomhaus/guild/internal/module"
 	_ "github.com/mathomhaus/guild/internal/modules" // activate core modules (quest/lore/session) in the registry
 )
+
+// cliModuleEnabledPredicate loads the merged config and returns the
+// predicate module.Enabled consults to decide which modules mount their
+// CLI verbs (ADR-006 Phase 3). CLI verb binding happens at package init,
+// before cobra parses flags, so this predicate reflects the file + env
+// layers ([modules] table, GUILD_MODULE_<NAME> / GUILD_NO_<NAME>); the
+// --module / --disable-module flags are still honored everywhere config is
+// re-loaded with the parsed FlagSet (the MCP and daemon paths). On a
+// config-load failure it returns nil, which module.Enabled treats as
+// "every module on its own DefaultEnabled()" — a broken config must never
+// silently strip the core verbs.
+func cliModuleEnabledPredicate() func(name string, def bool) bool {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return nil
+	}
+	return config.ModuleEnabled(cfg)
+}
 
 // bindModuleVerbs is the ADR-006 Phase 2 CLI cutover: it replaces the
 // per-file hand lists of bindRegistryVerb / bindLoreRegistryVerb calls
@@ -24,7 +43,7 @@ import (
 // subcommands in help output and the daemon-route parity tests diff verb
 // SETS, not order, so this loop is byte-identical to the old explicit lists.
 func bindModuleVerbs() {
-	for _, m := range module.Enabled(nil) {
+	for _, m := range module.Enabled(cliModuleEnabledPredicate()) {
 		deps, parent, ok := cliBindTargetForModule(m.Name())
 		if !ok {
 			// session contributes no CLI verbs; its bootstrap tools are MCP
