@@ -218,20 +218,53 @@ func (s *Scheduler) Last() LastPass {
 // armed, no pass is running, the daemon has been idle for at least Idle,
 // and the previous pass (if any) ended at least Idle ago. Caller holds
 // s.mu.
+//
+// It is a thin wrapper over autopassDecision so the firing logic has a
+// single source of truth: the bool it returns is exactly the value object's
+// Allow field, and recording (when wired) cannot drift from it.
 func (s *Scheduler) canFire(now time.Time) bool {
-	if !s.cfg.Enabled || s.cfg.Pass == nil || s.cfg.Idle <= 0 {
-		return false
+	return s.autopassDecision(now).Allow
+}
+
+// autopassDecision computes the frozen value object for the "fire a dream
+// pass now?" gate (ADR-006 Phase 5). It captures every boolean the gate
+// considers plus the decisive reason, WITHOUT changing the gate: Allow is
+// the same conjunction canFire always computed and the precedence of the
+// short-circuit checks is preserved. Caller holds s.mu (it reads
+// lastActivity / lastPassEnded / running).
+func (s *Scheduler) autopassDecision(now time.Time) Decision {
+	armed := s.cfg.Enabled && s.cfg.Pass != nil && s.cfg.Idle > 0
+	notRunning := !s.running
+	idleElapsed := armed && now.Sub(s.lastActivity) >= s.cfg.Idle
+	gapElapsed := s.lastPassEnded.IsZero() || (armed && now.Sub(s.lastPassEnded) >= s.cfg.Idle)
+
+	allow := false
+	reason := "fire"
+	switch {
+	case !armed:
+		reason = "disabled"
+	case !notRunning:
+		reason = "pass_in_flight"
+	case !idleElapsed:
+		reason = "not_idle"
+	case !gapElapsed:
+		reason = "gap_not_elapsed"
+	default:
+		allow = true
 	}
-	if s.running {
-		return false
+
+	return Decision{
+		Kind:   DecisionAutopass,
+		Allow:  allow,
+		Reason: reason,
+		At:     now,
+		Inputs: map[string]bool{
+			"armed":        armed,
+			"not_running":  notRunning,
+			"idle_elapsed": idleElapsed,
+			"gap_elapsed":  gapElapsed,
+		},
 	}
-	if now.Sub(s.lastActivity) < s.cfg.Idle {
-		return false
-	}
-	if !s.lastPassEnded.IsZero() && now.Sub(s.lastPassEnded) < s.cfg.Idle {
-		return false
-	}
-	return true
 }
 
 // Run drives the ticker loop until ctx is cancelled (daemon shutdown).
@@ -280,8 +313,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) maybeFire(ctx context.Context) {
 	s.mu.Lock()
 	now := s.clk.Now()
-	if !s.canFire(now) {
+	// Compute the frozen autopass decision once and branch on its Allow
+	// field, so the recorded record and the taken branch can never disagree
+	// (ADR-006 Phase 5). Recording is a no-op unless the observability module
+	// installed a recorder, so this is byte-identical when disabled.
+	dec := s.autopassDecision(now)
+	if !dec.Allow {
 		s.mu.Unlock()
+		recordDecision(dec)
 		return
 	}
 	// Arm: mark running and wire a cancellable pass context BEFORE
@@ -292,6 +331,10 @@ func (s *Scheduler) maybeFire(ctx context.Context) {
 	s.cancelPass = cancel
 	s.last = LastPass{Started: now}
 	s.mu.Unlock()
+
+	// Record the fire decision (Allow=true) once armed but before the pass
+	// runs, so the recorder sees the same decision stream as the skip path.
+	recordDecision(dec)
 
 	s.log.Info("daemon: sleep pass firing", "trigger", "daemon-idle", "budget", s.budget.String())
 

@@ -104,6 +104,13 @@ type Reaper struct {
 	// can see at a glance how many crashed agents' claims the daemon has
 	// returned to the board.
 	totalForfeited atomic.Int64
+
+	// onSwept, when non-nil, is called at the very end of sweep() (after the
+	// forfeit tally and the decision record). It is a test-only barrier seam:
+	// a test can synchronize on a sweep being fully complete without driving a
+	// second "barrier" tick that would race in an extra sweep. Nil in
+	// production, so the live sweep path is unchanged.
+	onSwept func()
 }
 
 // NewReaper validates cfg and returns a runnable Reaper.
@@ -157,6 +164,12 @@ func (r *Reaper) Run(ctx context.Context) {
 // failure). A sweep that forfeited or cleared anything logs a summary line;
 // an empty sweep stays quiet so a healthy idle daemon does not spam its log.
 func (r *Reaper) sweep(ctx context.Context) {
+	// Signal sweep completion to a test barrier, if one is installed, on every
+	// return path. Nil in production. This lets a test wait for the sweep to
+	// finish (tally added, decision recorded) without a stray second tick.
+	if r.onSwept != nil {
+		defer r.onSwept()
+	}
 	if r.cfg.Reap == nil {
 		return
 	}
@@ -166,11 +179,44 @@ func (r *Reaper) sweep(ctx context.Context) {
 			return
 		}
 		r.logger.Warn("daemon: lease reap sweep failed; will retry next tick", "err", err.Error())
+		// Record the failed sweep so an operator can see reap errors in the
+		// event stream (ADR-006 Phase 5). No-op unless a recorder is wired.
+		recordDecision(Decision{
+			Kind:   DecisionLeaseReap,
+			Allow:  false,
+			Reason: "sweep_error",
+			At:     r.clk.Now(),
+			Inputs: map[string]bool{"swept": true, "errored": true, "forfeited_any": false},
+		})
 		return
 	}
 	if out.Forfeited > 0 {
 		r.totalForfeited.Add(int64(out.Forfeited))
 	}
+	// Record the sweep decision (ADR-006 Phase 5). This does NOT change what
+	// the sweep did: the ReapFunc already ran and out is its result; we only
+	// snapshot it. The gate's Allow is "did this sweep forfeit anything",
+	// the actionable signal. Recording is a no-op unless the observability
+	// module installed a recorder, so the disabled path is byte-identical.
+	recordDecision(Decision{
+		Kind:   DecisionLeaseReap,
+		Allow:  out.Forfeited > 0,
+		Reason: reapReason(out),
+		At:     r.clk.Now(),
+		Inputs: map[string]bool{
+			"swept":           true,
+			"errored":         false,
+			"forfeited_any":   out.Forfeited > 0,
+			"skipped_live":    out.SkippedLive > 0,
+			"orphans_cleared": out.OrphansCleared > 0,
+		},
+		Metrics: map[string]int{
+			"scanned":         out.Scanned,
+			"forfeited":       out.Forfeited,
+			"skipped_live":    out.SkippedLive,
+			"orphans_cleared": out.OrphansCleared,
+		},
+	})
 	if out.Forfeited > 0 || out.OrphansCleared > 0 {
 		r.logger.Info("daemon: lease reaper swept",
 			"scanned", out.Scanned,
@@ -187,4 +233,20 @@ func (r *Reaper) sweep(ctx context.Context) {
 // status-request goroutine reads it while the sweep goroutine writes it.
 func (r *Reaper) TotalForfeited() int64 {
 	return r.totalForfeited.Load()
+}
+
+// reapReason summarizes a successful sweep's outcome for the decision
+// record's human-readable reason. It only describes what the sweep already
+// did; it never affects the sweep.
+func reapReason(out ReapOutcome) string {
+	switch {
+	case out.Forfeited > 0:
+		return "forfeited_zombie_claims"
+	case out.OrphansCleared > 0:
+		return "cleared_orphans_only"
+	case out.SkippedLive > 0:
+		return "all_expired_live"
+	default:
+		return "nothing_to_reap"
+	}
 }

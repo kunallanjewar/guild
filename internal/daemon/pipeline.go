@@ -339,6 +339,15 @@ func (p *Pipeline) handle(ctx context.Context, ev watch.Event) {
 		p.setLastErr("process event: " + err.Error())
 		p.log.Warn("daemon: watch pipeline event failed; dropping",
 			"project", ev.Project, "path", ev.Path, "kind", string(ev.Kind), "err", err.Error())
+		// Record the failed staleness-renewal so the event stream shows
+		// dropped events (ADR-006 Phase 5). No-op unless a recorder is wired.
+		recordDecision(Decision{
+			Kind:   DecisionStaleRenew,
+			Allow:  false,
+			Reason: "process_error",
+			At:     p.clk.Now(),
+			Inputs: map[string]bool{"errored": true, "signals_written": false, "quests_posted": false},
+		})
 		return
 	}
 	if res.Signals > 0 {
@@ -347,6 +356,26 @@ func (p *Pipeline) handle(ctx context.Context, ev watch.Event) {
 	if res.QuestsPosted > 0 {
 		p.questsPosted.Add(int64(res.QuestsPosted))
 	}
+	// Record the staleness-renewal decision (ADR-006 Phase 5). The
+	// ProcessFunc already flagged staleness and posted renewals; res is its
+	// result and we only snapshot it. Allow is "did this event lead to
+	// renewal action" (signals or quests). No-op unless a recorder is wired,
+	// so the disabled path is byte-identical.
+	recordDecision(Decision{
+		Kind:   DecisionStaleRenew,
+		Allow:  res.Signals > 0 || res.QuestsPosted > 0,
+		Reason: staleRenewReason(res),
+		At:     p.clk.Now(),
+		Inputs: map[string]bool{
+			"errored":         false,
+			"signals_written": res.Signals > 0,
+			"quests_posted":   res.QuestsPosted > 0,
+		},
+		Metrics: map[string]int{
+			"signals": res.Signals,
+			"quests":  res.QuestsPosted,
+		},
+	})
 	p.log.Info("daemon: watch event processed",
 		"project", ev.Project,
 		"path", ev.Path,
@@ -391,4 +420,19 @@ func (p *Pipeline) setLastErr(reason string) {
 	p.mu.Lock()
 	p.lastErr = reason
 	p.mu.Unlock()
+}
+
+// staleRenewReason summarizes a processed event's outcome for the decision
+// record's reason. It only describes what the ProcessFunc already did.
+func staleRenewReason(res EventResult) string {
+	switch {
+	case res.QuestsPosted > 0 && res.Signals > 0:
+		return "flagged_stale_and_posted_renewals"
+	case res.QuestsPosted > 0:
+		return "posted_renewals"
+	case res.Signals > 0:
+		return "flagged_stale"
+	default:
+		return "no_citing_entries"
+	}
 }
