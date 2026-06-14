@@ -144,6 +144,22 @@ func fileLayer(path string, dst *Config) error {
 	if md.IsDefined("profile", "preset") {
 		dst.Profile.Preset = tmp.Profile.Preset
 	}
+	// [embed] backend selection (ADR-006 Phase 4): per-key merge so a key
+	// absent from THIS file keeps the value a lower layer set.
+	if md.IsDefined("embed", "backend") {
+		dst.Embed.Backend = tmp.Embed.Backend
+	}
+	if md.IsDefined("embed", "model") {
+		dst.Embed.Model = tmp.Embed.Model
+	}
+	// [provider] LLM provider/model seam (ADR-006 Phase 4, deliverable 5):
+	// per-key merge, same posture as [embed].
+	if md.IsDefined("provider", "backend") {
+		dst.Provider.Backend = tmp.Provider.Backend
+	}
+	if md.IsDefined("provider", "model") {
+		dst.Provider.Model = tmp.Provider.Model
+	}
 	// [modules] toggle table (ADR-006 Phase 3): per-key merge so a toggle
 	// absent from THIS file keeps the value a lower layer set.
 	mergeModulesTable(md, tmp.Modules, dst)
@@ -221,6 +237,24 @@ func envLayer(dst *Config) {
 	}
 	if parseBoolEnv("GUILD_NO_WATCH") {
 		dst.Daemon.Watch = false
+	}
+	// Backend selection (ADR-006 Phase 4): GUILD_EMBED_BACKEND /
+	// GUILD_EMBED_MODEL and GUILD_PROVIDER_BACKEND / GUILD_PROVIDER_MODEL
+	// override the [embed] / [provider] sections, sitting above the file
+	// layers and below CLI flags. A set-but-empty value is ignored (treated
+	// as "no override") so an exported-empty env var never blanks the
+	// default backend.
+	if v := os.Getenv("GUILD_EMBED_BACKEND"); v != "" {
+		dst.Embed.Backend = v
+	}
+	if v := os.Getenv("GUILD_EMBED_MODEL"); v != "" {
+		dst.Embed.Model = v
+	}
+	if v := os.Getenv("GUILD_PROVIDER_BACKEND"); v != "" {
+		dst.Provider.Backend = v
+	}
+	if v := os.Getenv("GUILD_PROVIDER_MODEL"); v != "" {
+		dst.Provider.Model = v
 	}
 	// Module toggles (ADR-006 Phase 3): GUILD_MODULE_<NAME>=0/1 and
 	// GUILD_NO_<NAME>=1, following the established GUILD_NO_* convention.

@@ -4,8 +4,14 @@
 //  1. Built-in defaults (this file)
 //  2. ~/.guild/config.toml      (user-wide)
 //  3. <repo>/.guild/config.toml (per-project overrides)
-//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON, GUILD_NO_SLEEP, GUILD_NO_WATCH)
+//  4. Environment variables      (GUILD_PROJECT, GUILD_NO_USAGE_LOG, GUILD_NO_EMOJI, GUILD_NO_DAEMON, GUILD_NO_SLEEP, GUILD_NO_WATCH, GUILD_EMBED_BACKEND, GUILD_EMBED_MODEL, GUILD_PROVIDER_BACKEND, GUILD_PROVIDER_MODEL)
 //  5. CLI flags                  (via pflag.FlagSet)
+//
+// Backend selection ([embed].backend, [provider].backend; ADR-006 Phase 4)
+// rides the same five layers: the built-in default selects the bundled local
+// BGE embedder and a no-op LLM provider, so a silent config is byte-identical
+// to pre-Phase-4 behavior. A file key, then GUILD_EMBED_BACKEND /
+// GUILD_PROVIDER_BACKEND env, then a flag, override in that order.
 package config
 
 // ScoringConfig holds BM25 + recency + title-boost weights used by lore appraise.
@@ -93,6 +99,50 @@ type SleepConfig struct {
 	PassBudgetSeconds int `toml:"pass_budget_seconds"`
 }
 
+// EmbedConfig selects the embedding backend by name (ADR-006 Phase 4).
+// It is the config surface for the name-keyed embedder registry in
+// internal/lore/embed: Backend names a registered EmbedderFactory, Model is
+// an optional per-backend model identifier. The default (Backend="local-bge")
+// resolves to guild's bundled BGE/ONNX embedder, so a silent config is
+// byte-identical to the pre-Phase-4 behavior. internal/config deliberately
+// does NOT import internal/lore/embed (it sits at the bottom of the
+// dependency graph); the adapter layer translates this struct into an
+// embed.EmbedConfig at the wiring call site.
+type EmbedConfig struct {
+	// Backend is the registry name selecting which embedder to build:
+	// "local-bge" (default, the bundled BGE path), or an alternate
+	// registered backend. Empty is treated as the default. An unknown
+	// name is rejected at construction by BuildEmbedder, not here, so a
+	// config that names a backend a future build will register still loads.
+	Backend string `toml:"backend"`
+
+	// Model is an optional model identifier passed to the selected backend
+	// factory (e.g. an OpenAI/Ollama model name). The local BGE backend
+	// ignores it: its model is pinned by the bundled manifest. Empty is
+	// always valid.
+	Model string `toml:"model"`
+}
+
+// ProviderConfig is the LLM provider/model selection seam (ADR-006 Phase 4,
+// deliverable 5). It is the config surface a future LLM-calling module (e.g. a
+// sleep/compression module) will read to pick a provider+model by name from
+// the provider registry in internal/llm. No live LLM dependency or client is
+// wired in this phase: this struct plus the registry seam is the whole
+// surface. The default (Backend="noop") resolves to a registered stub that
+// never calls a network, so a silent config makes no provider call.
+type ProviderConfig struct {
+	// Backend names a registered LLM provider (e.g. "noop" today; "openai",
+	// "anthropic", "ollama" when a future module adds them). Empty resolves
+	// to the default stub. Selection is by name through the registry, the
+	// same idiom as [embed].backend.
+	Backend string `toml:"backend"`
+
+	// Model is the model identifier handed to the selected provider (e.g. a
+	// chat-model name). Empty defers to the provider's own default. The stub
+	// ignores it.
+	Model string `toml:"model"`
+}
+
 // DaemonConfig controls the optional background daemon.
 type DaemonConfig struct {
 	// Autostart lets the first MCP shim that finds no running daemon
@@ -178,6 +228,17 @@ type Config struct {
 	Telemetry TelemetryConfig `toml:"telemetry"`
 	Daemon    DaemonConfig    `toml:"daemon"`
 	Sleep     SleepConfig     `toml:"sleep"`
+
+	// Embed selects the embedding backend by name (ADR-006 Phase 4). The
+	// default backend is the bundled local BGE/ONNX embedder, so a silent
+	// config is byte-identical to pre-Phase-4 behavior. See EmbedConfig.
+	Embed EmbedConfig `toml:"embed"`
+
+	// Provider is the LLM provider/model selection seam (ADR-006 Phase 4,
+	// deliverable 5). The default backend is a no-op stub that makes no
+	// network call; a future LLM-calling module reads this to pick a
+	// provider by name. See ProviderConfig.
+	Provider ProviderConfig `toml:"provider"`
 
 	// Modules is the [modules] toggle table (ADR-006 Phase 3): a map from
 	// a capability module's Name() to an explicit on/off bit. A key absent
@@ -298,6 +359,24 @@ func baseDefaults() Config {
 			// short and new activity preempts them.
 			IdleMinutes:       10,
 			PassBudgetSeconds: 60,
+		},
+		Embed: EmbedConfig{
+			// "local-bge" is the bundled BGE/ONNX embedder, the same
+			// embedder guild builds today. The default MUST stay this so a
+			// config with no [embed] section yields byte-identical
+			// embeddings and wiring (ADR-006 Phase 4 parity bar). Model is
+			// empty: the local backend pins its model via the bundled
+			// manifest and ignores this field.
+			Backend: "local-bge",
+			Model:   "",
+		},
+		Provider: ProviderConfig{
+			// "noop" is the registered stub provider: it makes no network
+			// call and is the default so a silent config never reaches an
+			// LLM. A future LLM-calling module flips this to a real
+			// provider name. Empty model defers to the provider default.
+			Backend: "noop",
+			Model:   "",
 		},
 	}
 }
