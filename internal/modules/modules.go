@@ -24,5 +24,6 @@ import (
 	// Opt-in capability modules (off by default; the [modules] toggle, the
 	// GUILD_MODULE_* env, or --module activates them). Each registers itself
 	// and its config section in init().
+	_ "github.com/mathomhaus/guild/internal/eval"
 	_ "github.com/mathomhaus/guild/internal/observability"
 )

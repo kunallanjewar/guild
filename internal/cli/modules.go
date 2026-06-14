@@ -50,9 +50,32 @@ func bindModuleVerbs() {
 			// only and hand-wired. Skip rather than bind nil Commands.
 			continue
 		}
+		// Opt-in module parents (off by default) are attached to rootCmd only
+		// here, when the module is enabled, so a disabled module adds no
+		// top-level command to `guild --help` and the default surface stays
+		// byte-identical. Core parents (lore/quest) are already attached by
+		// root.go's AddCommand and are skipped by attachModuleParentIfNeeded.
+		attachModuleParentIfNeeded(m.Name(), parent)
 		for _, cmd := range m.Commands() {
 			bindModuleVerb(parent, cmd, deps)
 		}
+	}
+}
+
+// attachModuleParentIfNeeded attaches an opt-in module's cobra parent to
+// rootCmd the first time the module is bound, idempotently. Core parents
+// (lore, quest) are mounted unconditionally by root.go and must not be
+// double-added, so they are excluded here. An opt-in parent (eval) is added
+// only when its module is enabled, which is the mechanism that keeps the
+// default `guild --help` surface byte-identical.
+func attachModuleParentIfNeeded(name string, parent *cobra.Command) {
+	switch name {
+	case "eval":
+		if parent != nil && parent.Parent() == nil {
+			rootCmd.AddCommand(parent)
+		}
+	default:
+		// lore/quest: already attached by root.go; nothing to do.
 	}
 }
 
@@ -65,6 +88,8 @@ func cliBindTargetForModule(name string) (command.Deps, *cobra.Command, bool) {
 		return buildCLILoreDeps(), loreCmd, true
 	case "quest":
 		return buildCLICommandDeps(), questCmd, true
+	case "eval":
+		return buildCLIEvalDeps(), evalCmd, true
 	default:
 		return command.Deps{}, nil, false
 	}
