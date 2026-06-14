@@ -17,6 +17,7 @@ import (
 	"github.com/mathomhaus/guild/internal/command"
 	"github.com/mathomhaus/guild/internal/daemon"
 	"github.com/mathomhaus/guild/internal/lore"
+	"github.com/mathomhaus/guild/internal/module"
 	"github.com/mathomhaus/guild/internal/project"
 	"github.com/mathomhaus/guild/internal/quest"
 )
@@ -242,6 +243,19 @@ func NewDaemonExecHandler(questEmbed, loreEmbed any) daemon.ExecHandler {
 // newDaemonExecRegistry builds the dispatch table behind
 // NewDaemonExecHandler. Split out so the routing tests can diff the
 // registered names against cliRegistryBoundVerbs.
+//
+// ADR-006 Phase 3 cleanup: the daemon-side exec table is no longer a third
+// hand-list. It is derived from the SAME module registry the CLI binds
+// from — for each enabled module the loop resolves that module's exec Deps
+// builder (questDeps vs loreDeps, keyed by name, mirroring
+// cliBindTargetForModule) and calls BindExec on every Command the module
+// contributes. BindExec routes through RegisterExec, so exec-exempt verbs
+// (quest_orders) are skipped exactly as before, and the same cliBespokeVerbs
+// the CLI loop skips (lore_appraise/lore_study, which have hand-rolled
+// cobra commands and were never in the exec list; quest_clear, MCPOnly and
+// never CLI-bound) are skipped here too. The result is the identical verb
+// SET the old explicit list produced, which TestDaemonRoute_*
+// (diffVerbSets against cliRegistryBoundVerbs) pins.
 func newDaemonExecRegistry(questEmbed, loreEmbed any) *command.ExecRegistry {
 	reg := command.NewExecRegistry()
 
@@ -278,48 +292,38 @@ func newDaemonExecRegistry(questEmbed, loreEmbed any) *command.ExecRegistry {
 		return d
 	}
 
-	// Quest verbs: keep in lockstep with the bindRegistryVerb calls in
-	// quest.go. A verb missing here degrades gracefully: the daemon
-	// answers "unknown verb" and the client runs it locally.
-	command.RegisterExec(reg, quest.AcceptCommand, questDeps)
-	command.RegisterExec(reg, quest.FulfillCommand, questDeps)
-	command.RegisterExec(reg, quest.ForfeitCommand, questDeps)
-	command.RegisterExec(reg, quest.JournalCommand, questDeps)
-	command.RegisterExec(reg, quest.BriefCommand, questDeps)
-	command.RegisterExec(reg, quest.ActiveCommand, questDeps)
-	command.RegisterExec(reg, quest.SummonCommand, questDeps)
-	command.RegisterExec(reg, quest.OrdersCommand, questDeps) // skipped: exec-exempt (env-coupled identity)
-	command.RegisterExec(reg, quest.CampfireCommand, questDeps)
-	command.RegisterExec(reg, quest.EpicCommand, questDeps)
-	command.RegisterExec(reg, quest.PostCommand, questDeps)
-	command.RegisterExec(reg, quest.UpdateCommand, questDeps)
-	command.RegisterExec(reg, quest.ScrollCommand, questDeps)
-	command.RegisterExec(reg, quest.ListCommand, questDeps)
-	command.RegisterExec(reg, quest.GuildCommand, questDeps)
-	command.RegisterExec(reg, quest.PulseCommand, questDeps)
-	command.RegisterExec(reg, quest.SearchCommand, questDeps)
+	// execDepsForModule mirrors cliBindTargetForModule but yields the
+	// daemon-side exec DepsBuilder, so the exec table and the CLI bind the
+	// SAME modules' verbs with the SAME quest/lore split. ok=false means
+	// the module contributes no routable verbs (session).
+	execDepsForModule := func(name string) (command.DepsBuilder, bool) {
+		switch name {
+		case "lore":
+			return loreDeps, true
+		case "quest":
+			return questDeps, true
+		default:
+			return nil, false
+		}
+	}
 
-	// Lore verbs: keep in lockstep with the bindLoreRegistryVerb calls
-	// in lore_read.go, lore_write.go, and lore_health.go.
-	command.RegisterExec(reg, lore.OathCommand, loreDeps)
-	command.RegisterExec(reg, lore.DossierCommand, loreDeps)
-	command.RegisterExec(reg, lore.EchoesCommand, loreDeps)
-	command.RegisterExec(reg, lore.WhispersCommand, loreDeps)
-	command.RegisterExec(reg, lore.ListCommand, loreDeps)
-	command.RegisterExec(reg, lore.RipplesCommand, loreDeps)
-	command.RegisterExec(reg, lore.InscribeCommand, loreDeps)
-	command.RegisterExec(reg, lore.UpdateCommand, loreDeps)
-	command.RegisterExec(reg, lore.CatalogCommand, loreDeps)
-	command.RegisterExec(reg, lore.SealCommand, loreDeps)
-	command.RegisterExec(reg, lore.LinkCommand, loreDeps)
-	command.RegisterExec(reg, lore.UnlinkCommand, loreDeps)
-	command.RegisterExec(reg, lore.ReforgeCommand, loreDeps)
-	command.RegisterExec(reg, lore.InquestCommand, loreDeps)
-	command.RegisterExec(reg, lore.MeldCommand, loreDeps)
-	command.RegisterExec(reg, lore.CommuneCommand, loreDeps)
-	command.RegisterExec(reg, lore.EmbedderHealthCommand, loreDeps)
-	command.RegisterExec(reg, lore.EmbedRebuildCommand, loreDeps)
-	command.RegisterExec(reg, lore.CoverageReconcileCommand, loreDeps)
+	for _, m := range module.Enabled(cliModuleEnabledPredicate()) {
+		deps, ok := execDepsForModule(m.Name())
+		if !ok {
+			continue
+		}
+		for _, cmd := range m.Commands() {
+			// Skip the same verbs the CLI loop skips so the exec set
+			// matches cliRegistryBoundVerbs exactly: bespoke (appraise/
+			// study, hand-rolled cobra) and quest_clear (MCPOnly, never
+			// CLI-bound). BindExec additionally skips exec-exempt verbs
+			// (quest_orders) on its own.
+			if cliBespokeVerbs[cmd.WireName()] {
+				continue
+			}
+			cmd.BindExec(reg, deps)
+		}
+	}
 
 	return reg
 }

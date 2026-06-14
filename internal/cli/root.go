@@ -222,6 +222,18 @@ func init() {
 		return cmd.Help()
 	}
 
+	// Bind the module-registry verbs onto questCmd / loreCmd at this exact
+	// point — AFTER quest.go/lore_*.go init() set up the parents and their
+	// persistent flags (those files sort before root.go in init order), and
+	// BEFORE the AddCommand below attaches the groups to rootCmd so the root
+	// persistent --agent Bool is not yet inherited into the per-verb
+	// flagsets (which would clash with quest journal/orders/campfire/summon's
+	// local string --agent and panic with "--agent flag redefined"). Calling
+	// it explicitly here pins that load-bearing window by call order instead
+	// of by the "register_modules.go" filename sorting between quest.go and
+	// root.go, so a renamed or added cli file cannot silently break it.
+	setupModuleVerbs()
+
 	mcpCmd.AddCommand(mcpServeCmd)
 	daemonCmd.AddCommand(daemonRunCmd)
 	rootCmd.AddCommand(loreCmd, questCmd, mcpCmd, daemonCmd, versionCmd)

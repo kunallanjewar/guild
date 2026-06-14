@@ -198,6 +198,12 @@ func (d Deps) ResolveLoreValidDays() map[string]int {
 type Registrant interface {
 	BindCobra(parent *cobra.Command, d Deps)
 	BindMCP(server *sdkmcp.Server, d Deps)
+	// BindExec registers the verb on a daemon-side ExecRegistry with the
+	// given Deps builder (the type-erased RegisterExec). Lets the ADR-006
+	// module loop build the daemon JSON-exec dispatch table from a module's
+	// Commands() without recovering each command's concrete generic type.
+	// Exec-exempt verbs are skipped exactly as RegisterExec skips them.
+	BindExec(r *ExecRegistry, deps DepsBuilder)
 	// WireName returns the MCP tool wire name (Command.Name).
 	WireName() string
 	// CobraPath returns the cobra tree path (Command.CLIPath).
