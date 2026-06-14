@@ -413,6 +413,11 @@ e2e-update: ## Regenerate test/e2e/golden/ transcripts from a live run (review t
 	GUILD_E2E_DOCKER=1 GUILD_E2E_IMAGE=$(GUILD_E2E_IMAGE) GUILD_E2E_MODE=$(GUILD_E2E_MODE) GUILD_E2E_UPDATE=1 \
 		$(GO) test -count=1 -timeout 15m -v ./test/e2e/
 
+.PHONY: e2e-module-toggle
+e2e-module-toggle: docker-build ## ADR-006 Phase 3 proof: disable lore via GUILD_MODULE_LORE=0 and assert it vanishes from every surface
+	GUILD_E2E_DOCKER=1 GUILD_E2E_IMAGE=$(GUILD_E2E_IMAGE) GUILD_E2E_MODE=$(GUILD_E2E_MODE) \
+		$(GO) test -count=1 -timeout 15m -v -run TestE2EModuleToggle ./test/e2e/
+
 # ----------------------------------------------------------------------
 # CI (mirrors .github/workflows/*.yml)
 # ----------------------------------------------------------------------
