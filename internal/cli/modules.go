@@ -82,6 +82,12 @@ func attachModuleParentIfNeeded(name string, parent *cobra.Command) {
 // cliBindTargetForModule returns the CLI Deps bundle and cobra parent a
 // module's verbs attach to, keyed by module name. ok=false means the module
 // contributes no CLI verbs through the loop (session).
+//
+// A module not in the core set (e.g. an enabled compression module) gets a
+// generated top-level parent command, created on demand and attached to
+// rootCmd here. The loop only iterates ENABLED modules, so a disabled
+// compression module never reaches this branch and never adds a `compression`
+// command to the CLI — the default surface stays byte-identical.
 func cliBindTargetForModule(name string) (command.Deps, *cobra.Command, bool) {
 	switch name {
 	case "lore":
@@ -90,9 +96,31 @@ func cliBindTargetForModule(name string) (command.Deps, *cobra.Command, bool) {
 		return buildCLICommandDeps(), questCmd, true
 	case "eval":
 		return buildCLIEvalDeps(), evalCmd, true
-	default:
+	case "session":
 		return command.Deps{}, nil, false
+	default:
+		return command.Deps{}, ensureModuleParent(name), true
 	}
+}
+
+// moduleParents holds the generated top-level parent command for each
+// non-core enabled module, created once and attached to rootCmd.
+var moduleParents = map[string]*cobra.Command{}
+
+// ensureModuleParent returns (creating + attaching once) the top-level cobra
+// parent for a non-core module's verbs.
+func ensureModuleParent(name string) *cobra.Command {
+	if c, ok := moduleParents[name]; ok {
+		return c
+	}
+	c := &cobra.Command{
+		Use:   name,
+		Short: name + " capability (opt-in module)",
+		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	}
+	moduleParents[name] = c
+	rootCmd.AddCommand(c)
+	return c
 }
 
 // cliBespokeVerbs are the registry tool names whose CLI surface is NOT bound
