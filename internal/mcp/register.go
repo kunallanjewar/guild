@@ -201,7 +201,23 @@ func (c *serverCore) mcpDepsForModule(name string) (command.Deps, bool) {
 		return c.buildMCPLoreDeps(), true
 	case "quest":
 		return c.buildMCPCommandDeps(), true
+	case "eval":
+		return c.buildMCPEvalDeps(), true
 	default:
 		return command.Deps{}, false
+	}
+}
+
+// buildMCPEvalDeps constructs the MCP-side Deps for the eval module (ADR-006
+// Phase 6). The eval_run handler is self-contained — it seeds and tears down
+// its own isolated in-memory corpus and never touches the real databases — so
+// it needs no OpenDB / ResolveProj / OpenLoreDB. We wire only Now and the
+// usage.log telemetry emitter so an eval_run call is logged like any other
+// tool. The module is off by default, so this Deps is only ever built when an
+// operator has explicitly enabled eval.
+func (c *serverCore) buildMCPEvalDeps() command.Deps {
+	return command.Deps{
+		Now:             time.Now,
+		RecordTelemetry: c.recordMCPTelemetry,
 	}
 }
