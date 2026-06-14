@@ -20,4 +20,9 @@ import (
 	_ "github.com/mathomhaus/guild/internal/lore"
 	_ "github.com/mathomhaus/guild/internal/quest"
 	_ "github.com/mathomhaus/guild/internal/session"
+
+	// Opt-in capability modules (off by default; the [modules] toggle, the
+	// GUILD_MODULE_* env, or --module activates them). Each registers itself
+	// and its config section in init().
+	_ "github.com/mathomhaus/guild/internal/observability"
 )
