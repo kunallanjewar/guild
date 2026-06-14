@@ -3,6 +3,7 @@ package mcp
 import (
 	"sync"
 
+	"github.com/mathomhaus/guild/internal/config"
 	"github.com/mathomhaus/guild/internal/hints"
 )
 
@@ -56,6 +57,16 @@ func NewProviders() *Providers {
 	p := &Providers{backfill: &backfillGate{}}
 	p.embed = newEmbedProvider(openLoreDB, newLogger())
 	p.embed.backfill = p.backfill
+	// Embedder backend selection (ADR-006 Phase 4). Read [embed].backend
+	// once at bundle construction and stamp it onto the lazy resolver. The
+	// default (local-bge) is the byte-identical local path; a configured
+	// alternate backend engages inside WireEmbedDeps. A config-load error is
+	// swallowed to the default backend: the embedder seam must never fail
+	// server boot, exactly like the rest of this bundle's lazy wiring.
+	if cfg, err := config.Load(nil); err == nil && cfg != nil {
+		p.embed.backend = cfg.Embed.Backend
+		p.embed.model = cfg.Embed.Model
+	}
 	p.questEmbed = newQuestEmbedProvider(p.embed, openQuestDB, newLogger())
 	return p
 }

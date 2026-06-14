@@ -56,6 +56,16 @@ type embedProvider struct {
 	// index load. Injected so tests route around ~/.guild/lore.db.
 	openDB func(ctx context.Context) (*sql.DB, error)
 
+	// backend and model select the embedder by name from the
+	// internal/lore/embed registry (ADR-006 Phase 4, [embed].backend).
+	// Empty backend is the default local BGE path: reconstruct passes
+	// these into lore.EmbedWireOptions, and an empty/"local-bge" backend
+	// runs the existing byte-identical construction. NewProviders reads
+	// them from config.Load once at bundle construction; a non-default
+	// value engages an alternate backend.
+	backend string
+	model   string
+
 	// logger receives the "embedder wired lazily" structured line on
 	// every reconstruction and the "embedder resolve failed" warn on
 	// any error.
@@ -188,6 +198,11 @@ func (p *embedProvider) reconstruct(ctx context.Context, reason string) *lore.Em
 		Async:     true, // MCP surface: fire-and-forget Tx2.
 		LoadIndex: true, // warm once; subsequent appraises reuse it.
 		Logger:    p.logger,
+		// Backend selection (ADR-006 Phase 4). Empty (the default) keeps the
+		// byte-identical local BGE path; a configured alternate backend
+		// routes through the embedder registry inside WireEmbedDeps.
+		Backend: p.backend,
+		Model:   p.model,
 	})
 
 	coverageNum, coverageDen, epoch := readCoverageDiag(bootCtx, db)
