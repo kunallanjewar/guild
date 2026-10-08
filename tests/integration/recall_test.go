@@ -81,14 +81,26 @@ func TestRecall_ExactTitleRank1(t *testing.T) {
 	}
 }
 
-var appraiseResultRow = regexp.MustCompile(`(?m)^[ \t]*(?:LORE|ENTRY)-[0-9]+[ \t]+\[[^\]\r\n]*\][ \t]+([^\r\n]+)$`)
+var appraiseResultRow = regexp.MustCompile(`^[ \t]*(?:LORE|ENTRY)-[0-9]+[ \t]+\[[^\]\r\n]*\][ \t]*([^\r\n]*)$`)
 
 func firstAppraiseTitle(output string) string {
-	match := appraiseResultRow.FindStringSubmatch(output)
-	if match == nil {
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		match := appraiseResultRow.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		if match[1] != "" {
+			return normalizeTitle(match[1])
+		}
+		// The legacy CLI puts the title on the next line; the command
+		// registry and MCP render it on the same line as the metadata.
+		if i+1 < len(lines) {
+			return normalizeTitle(lines[i+1])
+		}
 		return ""
 	}
-	return normalizeTitle(match[1])
+	return ""
 }
 
 func normalizeTitle(title string) string {
@@ -109,6 +121,10 @@ func TestRecallResultParsing_RejectsQueryEcho(t *testing.T) {
 	output := "1 result(s):\n  LORE-1 [example/decision · current · 1d ago]  Durable retry policy\n  Summary"
 	if got := firstAppraiseTitle(output); got != normalizeTitle(title) {
 		t.Errorf("first result title = %q, want %q", got, normalizeTitle(title))
+	}
+	output = "1 entry(ies) appraised:\n  LORE-1 [example/decision · current · today]\n  Durable retry policy\n  Summary"
+	if got := firstAppraiseTitle(output); got != normalizeTitle(title) {
+		t.Errorf("multiline first result title = %q, want %q", got, normalizeTitle(title))
 	}
 }
 
