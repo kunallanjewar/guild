@@ -241,6 +241,33 @@ func applyOneFS(ctx context.Context, db *sql.DB, fsys fs.FS, m migration) error 
 	// Rollback is a no-op if Commit already ran; safe to always-defer.
 	defer func() { _ = tx.Rollback() }()
 
+	// Acquire SQLite's writer lock before reading the version. A deferred
+	// transaction that reads first cannot safely upgrade its snapshot when
+	// another process migrates concurrently.
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET version = version WHERE 0`); err != nil {
+		return fmt.Errorf("storage: migrate: lock version %d: %w", m.version, err)
+	}
+	var recorded int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.version).Scan(&recorded); err != nil {
+		return err
+	}
+	if recorded != 0 {
+		return tx.Commit()
+	}
+
+	// Version 009 historically meant either body or sleep journal. Version
+	// 012 converges the body schema without rewriting that audit history or
+	// treating a duplicate-column error as a general migration success.
+	if m.filename == "012_lore_body.up.sql" {
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'body'`).Scan(&present); err != nil {
+			return err
+		}
+		if present != 0 {
+			raw = nil
+		}
+	}
+
 	for i, stmt := range splitStatements(string(raw)) {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("storage: migrate: version %d statement %d: %w",
