@@ -3,9 +3,9 @@ package quest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/mathomhaus/guild/internal/command"
@@ -202,38 +202,44 @@ func RunQuestSearchForProject(ctx context.Context, db *sql.DB, query string, lim
 
 	fts := questFTSQuery(query)
 
-	// BM25 arm: fetch up to questRRFTopK entity IDs in BM25 rank order.
-	bm25IDs, err := questBM25TopK(ctx, db, fts, questRRFTopK)
-	if err != nil {
-		return SearchOutput{}, fmt.Errorf("quest search: bm25: %w", err)
+	// Filter each retrieval arm before its candidate limit. Keep the complete
+	// fused candidate set until hydration, then expand if concurrent deletes
+	// leave fewer than the requested number of results.
+	k := questRRFTopK
+	if limit > k {
+		k = limit
 	}
-
 	arm := "bm25"
 	var coverage float64
-	finalIDs := bm25IDs
-
-	// Vector arm (optional). Requires a wired QuestEmbedDeps and
-	// sufficient coverage.
-	if embedDeps.Enabled() {
-		cov, vecIDs, vecErr := questVectorTopK(ctx, db, embedDeps, query, questRRFTopK)
-		coverage = cov
-		if vecErr == nil && cov >= questCoverageGate && len(vecIDs) > 0 {
-			bm25Ranked := make(embed.Ranked, len(bm25IDs))
-			for i, id := range bm25IDs {
-				bm25Ranked[i] = id
-			}
-			vecRanked := make(embed.Ranked, len(vecIDs))
-			for i, id := range vecIDs {
-				vecRanked[i] = id
-			}
-			finalIDs = []int64(embed.Fuse(bm25Ranked, vecRanked, limit))
-			arm = "rrf"
+	var results []QuestSearchResult
+	for {
+		bm25IDs, err := questBM25TopK(ctx, db, fts, k, projectID)
+		if err != nil {
+			return SearchOutput{}, fmt.Errorf("quest search: bm25: %w", err)
 		}
-	}
-
-	results, err := hydrateQuestResults(ctx, db, finalIDs, limit, projectID)
-	if err != nil {
-		return SearchOutput{}, fmt.Errorf("quest search: hydrate: %w", err)
+		finalIDs := bm25IDs
+		var vecIDs []int64
+		arm = "bm25"
+		if embedDeps.Enabled() {
+			cov, ids, vecErr := questVectorTopK(ctx, db, embedDeps, query, k, projectID)
+			coverage = cov
+			if vecErr == nil && cov >= questCoverageGate && len(ids) > 0 {
+				vecIDs = ids
+				finalIDs = []int64(embed.Fuse(embed.Ranked(bm25IDs), embed.Ranked(vecIDs), len(bm25IDs)+len(vecIDs)))
+				arm = "rrf"
+			}
+		}
+		results, err = hydrateQuestResults(ctx, db, finalIDs, limit, projectID)
+		if err != nil {
+			return SearchOutput{}, fmt.Errorf("quest search: hydrate: %w", err)
+		}
+		if len(results) >= limit || (len(bm25IDs) < k && len(vecIDs) < k) {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return SearchOutput{}, err
+		}
+		k *= 2
 	}
 
 	return SearchOutput{
@@ -247,7 +253,7 @@ func RunQuestSearchForProject(ctx context.Context, db *sql.DB, query string, lim
 // questBM25TopK runs an FTS5 BM25 query against tasks_fts and returns
 // up to k entity IDs (tasks_fts_rows.id integers) in BM25 rank order.
 // Returns an empty slice (not an error) when fts is "" or no rows match.
-func questBM25TopK(ctx context.Context, db *sql.DB, fts string, k int) ([]int64, error) {
+func questBM25TopK(ctx context.Context, db *sql.DB, fts string, k int, projectID string) ([]int64, error) {
 	if fts == "" {
 		return nil, nil
 	}
@@ -256,10 +262,12 @@ func questBM25TopK(ctx context.Context, db *sql.DB, fts string, k int) ([]int64,
 	rows, err := db.QueryContext(ctx, //nolint:sqlcheck // fts user query flows through ? bind; table name is a literal
 		`SELECT tasks_fts.rowid
 		 FROM tasks_fts
-		 WHERE tasks_fts MATCH ?
-		 ORDER BY tasks_fts.rank
+		 JOIN tasks_fts_rows r ON r.id = tasks_fts.rowid
+		 JOIN task_status s ON s.project_id = r.project_id AND s.task_id = r.task_id
+		 WHERE tasks_fts MATCH ? AND r.project_id = ? AND r.body != ''
+		 ORDER BY tasks_fts.rank, r.id
 		 LIMIT ?`,
-		fts, k,
+		fts, projectID, k,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("quest bm25: fts query: %w", err)
@@ -282,22 +290,18 @@ func questBM25TopK(ctx context.Context, db *sql.DB, fts string, k int) ([]int64,
 // stay on the BM25 arm.
 //
 //nolint:gocritic // unnamedResult: the three return positions are named in the comment above
-func questVectorTopK(ctx context.Context, db *sql.DB, deps *QuestEmbedDeps, query string, k int) (float64, []int64, error) {
-	// Read quest coverage from meta.
-	var covNum, covDen int64
-	if scanErr := db.QueryRowContext(ctx,
-		`SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key = 'quest.vector_coverage_num'`,
-	).Scan(&covNum); scanErr != nil {
-		covNum = 0
+func questVectorTopK(ctx context.Context, db *sql.DB, deps *QuestEmbedDeps, query string, k int, projectID string) (float64, []int64, error) {
+	allowed, err := questSearchEligibleIDs(ctx, db, projectID)
+	if err != nil {
+		return 0, nil, err
 	}
-	if scanErr := db.QueryRowContext(ctx,
-		`SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key = 'quest.vector_coverage_den'`,
-	).Scan(&covDen); scanErr != nil {
-		covDen = 0
+	coverage, err := embed.ReadCoverage(ctx, db, embed.QuestCorpus{}, deps.ModelID, func(id int64) bool { return allowed[id] })
+	if err != nil {
+		return 0, nil, fmt.Errorf("quest vector: coverage: %w", err)
 	}
 	var cov float64
-	if covDen > 0 {
-		cov = float64(covNum) / float64(covDen)
+	if coverage.Eligible > 0 {
+		cov = float64(coverage.Fresh) / float64(coverage.Eligible)
 	}
 
 	if cov < questCoverageGate {
@@ -320,7 +324,7 @@ func questVectorTopK(ctx context.Context, db *sql.DB, deps *QuestEmbedDeps, quer
 	}
 
 	// TopK from the in-process index.
-	hits, topkErr := deps.Index.TopK(qvec, k)
+	hits, topkErr := deps.Index.TopKFiltered(qvec, k, func(id int64) bool { return coverage.FreshIDs[id] })
 	if topkErr != nil {
 		return cov, nil, fmt.Errorf("quest vector: topk: %w", topkErr)
 	}
@@ -331,65 +335,62 @@ func questVectorTopK(ctx context.Context, db *sql.DB, deps *QuestEmbedDeps, quer
 	return cov, out, nil
 }
 
-// hydrateQuestResults resolves tasks_fts_rows integer IDs back to
-// task_ids and loads subject + status + epic via event-sourced Load.
-// Returns up to limit results in the same order as ids.
-func hydrateQuestResults(ctx context.Context, db *sql.DB, ids []int64, limit int, projectID string) ([]QuestSearchResult, error) {
-	if len(ids) == 0 {
-		return nil, nil
+// questSearchEligibleIDs selects project-qualified, canonical quests before
+// vector truncation. Completed quests are eligible; deleted rows are excluded.
+func questSearchEligibleIDs(ctx context.Context, db *sql.DB, projectID string) (map[int64]bool, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT r.id FROM tasks_fts_rows r
+		 JOIN task_status s ON s.project_id = r.project_id AND s.task_id = r.task_id
+		 WHERE r.project_id = ? AND r.body != ''`, projectID)
+	if err != nil {
+		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
+	allowed := make(map[int64]bool)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		allowed[id] = true
+	}
+	return allowed, rows.Err()
+}
 
-	// Resolve integer bridge IDs to task_id strings.
-	idToTaskID := make(map[int64]string, len(ids))
-	for _, id := range ids {
+// hydrateQuestResults resolves the same project-qualified bridge used during
+// scoring. It skips concurrent deletions and preserves candidate rank order.
+func hydrateQuestResults(ctx context.Context, db *sql.DB, ids []int64, limit int, projectID string) ([]QuestSearchResult, error) {
+	out := make([]QuestSearchResult, 0, min(limit, len(ids)))
+	seen := make(map[string]bool, len(ids))
+	for rank, id := range ids {
 		var taskID string
 		err := db.QueryRowContext(ctx,
-			`SELECT task_id FROM tasks_fts_rows WHERE id = ?`, id,
+			`SELECT task_id FROM tasks_fts_rows WHERE id = ? AND project_id = ?`, id, projectID,
 		).Scan(&taskID)
-		if err != nil {
-			continue // skip missing (deleted mid-search)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
 		}
-		idToTaskID[id] = taskID
-	}
-
-	type ranked struct {
-		rank   int
-		result QuestSearchResult
-	}
-	seen := make(map[string]bool, len(ids))
-	ordered := make([]ranked, 0, len(ids))
-	for rank, id := range ids {
-		taskID, ok := idToTaskID[id]
-		if !ok || seen[taskID] {
+		if err != nil {
+			return nil, err
+		}
+		if seen[taskID] {
 			continue
 		}
 		seen[taskID] = true
-
-		// Load uses event-sourced spec replay to get subject + epic.
 		q, err := Load(ctx, db, projectID, taskID)
-		if err != nil {
-			continue // quest deleted mid-search; skip gracefully
+		if errors.Is(err, ErrNotFound) {
+			continue
 		}
-		ordered = append(ordered, ranked{
-			rank: rank,
-			result: QuestSearchResult{
-				QuestID: q.ID,
-				Subject: q.Subject,
-				Status:  string(q.Status),
-				Epic:    q.Epic,
-				Score:   1.0 / float64(embed.RRFK+rank+1),
-			},
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, QuestSearchResult{
+			QuestID: q.ID,
+			Subject: q.Subject,
+			Status:  string(q.Status),
+			Epic:    q.Epic,
+			Score:   1.0 / float64(embed.RRFK+rank+1),
 		})
-	}
-
-	// Re-sort by original rank order (may have gaps from skipped IDs).
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].rank < ordered[j].rank
-	})
-
-	out := make([]QuestSearchResult, 0, len(ordered))
-	for _, r := range ordered {
-		out = append(out, r.result)
 		if len(out) >= limit {
 			break
 		}

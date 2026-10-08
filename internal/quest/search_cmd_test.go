@@ -235,7 +235,11 @@ func TestQuestSearch_RRFArmAboveCoverageFloor(t *testing.T) {
 		if embedErr != nil {
 			t.Fatalf("embed row %d: %v", br.id, embedErr)
 		}
-		entry := embed.PendingEntry{ID: br.id, Summary: "feature variant"}
+		source, sourceErr := (embed.QuestCorpus{}).SourceText(ctx, db, br.id)
+		if sourceErr != nil {
+			t.Fatal(sourceErr)
+		}
+		entry := embed.PendingEntry{ID: br.id, Summary: source}
 		if insertErr := embed.InsertVectorRow(ctx, db, embed.QuestCorpus{}, entry, vec, modelID); insertErr != nil {
 			t.Fatalf("insert vector row %d: %v", br.id, insertErr)
 		}
