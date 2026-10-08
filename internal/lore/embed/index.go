@@ -260,8 +260,8 @@ func (i *Index) LoadFromDB(ctx context.Context, db *sql.DB) (int, error) {
 	// never from user input. Query parameters still flow through the
 	// driver's placeholder substitution. gosec G201 fires on any SQL
 	// Sprintf so we suppress it locally.
-	query := fmt.Sprintf(`SELECT entry_id, vec FROM %s WHERE model_id = ? ORDER BY entry_id`, i.corpus.VectorTable()) //nolint:gosec // G201: table name is a compile-time constant from the corpus adapter, not user input.
-	rows, err := db.QueryContext(ctx, query, i.modelID)                                                               //nolint:sqlcheck // query templated from compile-time corpus.VectorTable(), not user input; ? placeholders preserved.
+	query := fmt.Sprintf(`SELECT v.entry_id, v.vec FROM %s v JOIN %s e ON e.%s=v.entry_id WHERE v.model_id = ? AND v.dim=384 AND e.%s ORDER BY v.entry_id`, i.corpus.VectorTable(), i.corpus.EntityTable(), i.corpus.EntityIDColumn(), i.corpus.ActivePredicate()) //nolint:gosec // G201: table name is a compile-time constant from the corpus adapter, not user input.
+	rows, err := db.QueryContext(ctx, query, i.modelID)                                                                                                                                                                                                            //nolint:sqlcheck // query templated from compile-time corpus.VectorTable(), not user input; ? placeholders preserved.
 	if err != nil {
 		return 0, fmt.Errorf("embed/index: SELECT %s: %w", i.corpus.VectorTable(), err)
 	}
@@ -453,6 +453,12 @@ func (i *Index) Splice(entryID int64, vec []int8, newEpoch int64) error {
 // loaded. Returns ErrIndexStale when LoadFromDB has not run. Returns
 // ErrQueryShape on bad qvec length.
 func (i *Index) TopK(qvec []int8, k int) ([]ScoredEntry, error) {
+	return i.TopKFiltered(qvec, k, nil)
+}
+
+// TopKFiltered applies eligibility before scoring and limiting candidates.
+// The callback must not mutate the index; nil permits every indexed ID.
+func (i *Index) TopKFiltered(qvec []int8, k int, allowed func(int64) bool) ([]ScoredEntry, error) {
 	if len(qvec) != VecDim {
 		return nil, ErrQueryShape
 	}
@@ -479,12 +485,15 @@ func (i *Index) TopK(qvec []int8, k int) ([]ScoredEntry, error) {
 	// bandwidth-bound, not compute-bound, so a heap-based top-k
 	// prune does not materially beat "score all then partial sort"
 	// until the corpus is substantially larger. Revisit if ever.
-	scores := make([]ScoredEntry, n)
+	scores := make([]ScoredEntry, 0, n)
 	for j := 0; j < n; j++ {
-		scores[j] = ScoredEntry{
+		if allowed != nil && !allowed(i.entries[j]) {
+			continue
+		}
+		scores = append(scores, ScoredEntry{
 			EntryID: i.entries[j],
 			Score:   cosineInt8(qvec, i.vectors[j]),
-		}
+		})
 	}
 
 	// Partial sort: we only need the top k. sort.Slice with a
@@ -500,6 +509,9 @@ func (i *Index) TopK(qvec []int8, k int) ([]ScoredEntry, error) {
 		// the RRF merge downstream).
 		return scores[a].EntryID < scores[b].EntryID
 	})
+	if k > len(scores) {
+		k = len(scores)
+	}
 	return scores[:k], nil
 }
 
