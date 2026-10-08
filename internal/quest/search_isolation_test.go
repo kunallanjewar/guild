@@ -79,6 +79,7 @@ func seedSearchVectors(t *testing.T, db *sql.DB, wantedProject string) *QuestEmb
 	ctx := context.Background()
 	const modelID = "test-quest-model"
 	upsertQuestMeta(t, db, "quest.embedder_model_id", modelID)
+	upsertQuestMeta(t, db, "quest.embedder_state", "enabled")
 	rows, err := db.QueryContext(ctx, `SELECT id, project_id FROM tasks_fts_rows WHERE body != '' ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
@@ -246,5 +247,30 @@ func TestQuestSearch_ProjectScopedLifecycle(t *testing.T) {
 	out, err = RunQuestSearchForProject(ctx, db, "foreign original", 1, "other", nil)
 	if err != nil || len(out.Results) != 1 || out.Results[0].QuestID != foreign.ID {
 		t.Fatalf("same-number peer damaged by deletion: out=%+v err=%v", out, err)
+	}
+}
+
+func TestQuestSearch_PartialFreshVectorsAndDisabledFallback(t *testing.T) {
+	db, pid := newTestDB(t)
+	ctx := context.Background()
+	lexical := mustPost(t, db, pid, PostParams{Subject: "partialkeyword lexical answer"})
+	semantic := mustPost(t, db, pid, PostParams{Subject: "semantic answer"})
+	deps := seedSearchVectors(t, db, pid)
+	// The strongest lexical answer has no vector. Partial vector coverage
+	// should remain usable without displacing that independent BM25 evidence.
+	if _, err := db.ExecContext(ctx, `DELETE FROM quest_vectors WHERE entry_id=?`, searchBridgeID(t, db, pid, lexical.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='quest.vector_epoch'`); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RunQuestSearchForProject(ctx, db, "partialkeyword", 2, pid, deps)
+	if err != nil || out.Arm != "rrf" || out.Coverage != 0.5 || len(out.Results) != 2 || out.Results[0].QuestID != lexical.ID || out.Results[1].QuestID != semantic.ID {
+		t.Fatalf("partial fresh vector policy: out=%+v err=%v", out, err)
+	}
+	upsertQuestMeta(t, db, "quest.embedder_state", "disabled")
+	out, err = RunQuestSearchForProject(ctx, db, "partialkeyword", 2, pid, deps)
+	if err != nil || out.Arm != "bm25" || len(out.Results) != 1 || out.Results[0].QuestID != lexical.ID {
+		t.Fatalf("disabled state ignored retained vector dependencies: out=%+v err=%v", out, err)
 	}
 }

@@ -18,11 +18,6 @@ import (
 // unexported symbol. Both use the same \w+ pattern.
 var questWordRE = regexp.MustCompile(`\w+`)
 
-// questCoverageGate is the minimum vector coverage fraction required to
-// enable the RRF vector arm. Matches lore.CoverageThreshold (ADR-003
-// "Partial coverage and deterministic fallback").
-const questCoverageGate = 0.90
-
 // questFTSQuery converts a raw user query into an FTS5 MATCH expression
 // for tasks_fts. Applies lore.BM25Stopwords filter and an OR-prefix
 // scheme identical to lore.ftsQuery so agents learn one mental model.
@@ -104,17 +99,17 @@ const questRRFTopK = embed.RRFK
 //
 // Pipeline:
 //  1. Build FTS5 MATCH expression with BM25Stopwords filter.
-//  2. Run BM25 top-questRRFTopK against tasks_fts (lexical arm).
-//  3. If a QuestEmbedDeps is wired AND quest vector coverage >= 0.90:
+//  2. Run project-scoped BM25 candidates against tasks_fts (lexical arm).
+//  3. If the enabled quest embedder has fresh vectors in this project:
 //     a. CheckAndReload the in-process quest index.
 //     b. Embed the query and quantize to int8.
-//     c. Index.TopK(questRRFTopK) for the vector arm.
-//     d. embed.Fuse(bm25Arm, vecArm, limit) at k=60.
+//     c. Index.TopKFiltered for fresh, project-scoped vector candidates.
+//     d. FuseBestRank preserves strong evidence from either arm.
 //  4. Hydrate task fields for the fused entity IDs.
 //  5. Return compact results (agents: focus on quest_id + subject).
 //
-// Coverage gate: < 0.90 falls back to BM25-only, matching
-// lore_appraise's CoverageThreshold contract (ADR-003).
+// Partial vector indexes remain useful: missing and stale vectors stay out
+// of the semantic arm while their quests remain eligible for keyword search.
 //
 // Vector arm note: the quest-specific Index is wired via QuestEmbedDeps
 // resolved from command.Deps.Embed at handler entry (QUEST-258). The
@@ -126,8 +121,8 @@ var SearchCommand = &command.Command[SearchInput, SearchOutput]{
 	CLIPath: []string{"quest", "search"},
 	Short:   "search quests by keyword or semantic paraphrase",
 	Long: "BM25+stopwords full-text search over quest subjects and spec notes. " +
-		"When quest vector coverage >= 90%, adds a semantic arm and RRF-fuses " +
-		"(k=60, same gate and fusion as lore_appraise). " +
+		"When fresh quest vectors are available, adds a semantic arm and blends " +
+		"rankings while preserving strong results from either arm. " +
 		"Returns up to 10 results. Replaces quest list --all | grep.",
 	Args: []command.ArgSpec{
 		{
@@ -223,9 +218,9 @@ func RunQuestSearchForProject(ctx context.Context, db *sql.DB, query string, lim
 		if embedDeps.Enabled() {
 			cov, ids, vecErr := questVectorTopK(ctx, db, embedDeps, query, k, projectID)
 			coverage = cov
-			if vecErr == nil && cov >= questCoverageGate && len(ids) > 0 {
+			if vecErr == nil && len(ids) > 0 {
 				vecIDs = ids
-				finalIDs = []int64(embed.Fuse(embed.Ranked(bm25IDs), embed.Ranked(vecIDs), len(bm25IDs)+len(vecIDs)))
+				finalIDs = []int64(embed.FuseBestRank(embed.Ranked(bm25IDs), embed.Ranked(vecIDs), len(bm25IDs)+len(vecIDs)))
 				arm = "rrf"
 			}
 		}
@@ -291,6 +286,15 @@ func questBM25TopK(ctx context.Context, db *sql.DB, fts string, k int, projectID
 //
 //nolint:gocritic // unnamedResult: the three return positions are named in the comment above
 func questVectorTopK(ctx context.Context, db *sql.DB, deps *QuestEmbedDeps, query string, k int, projectID string) (float64, []int64, error) {
+	// Explicitly disabled or unhealthy state stays on BM25 even if a caller
+	// retains old dependencies across a state change.
+	var state string
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'quest.embedder_state'`).Scan(&state); err != nil {
+		return 0, nil, fmt.Errorf("quest vector: state: %w", err)
+	}
+	if state != "enabled" {
+		return 0, nil, nil
+	}
 	allowed, err := questSearchEligibleIDs(ctx, db, projectID)
 	if err != nil {
 		return 0, nil, err
@@ -304,7 +308,7 @@ func questVectorTopK(ctx context.Context, db *sql.DB, deps *QuestEmbedDeps, quer
 		cov = float64(coverage.Fresh) / float64(coverage.Eligible)
 	}
 
-	if cov < questCoverageGate {
+	if coverage.Fresh == 0 {
 		return cov, nil, nil
 	}
 
