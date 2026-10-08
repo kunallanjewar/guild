@@ -13,7 +13,7 @@
 
 ## What Is It
 
-`guild` is a single compiled Go binary containing a first-class MCP server backed by embedded SQLite. State lives strictly on local host; nothing leaves your machine. Search blends keyword (BM25) with vector similarity, fused via reciprocal-rank fusion, so "how did we do X last time" surfaces both exact-term and semantic neighbors.
+`guild` is a single compiled Go binary containing a first-class MCP server backed by embedded SQLite. State lives strictly on local host; nothing leaves your machine. Search blends keyword (BM25) with vector similarity using rank fusion that preserves strong matches from either source, so "how did we do X last time" surfaces both exact-term and semantic neighbors.
 
 Guild is designed to be operated autonomously by the agents, for the agents. Guildmasters (us humans) stay in the loop for important decisions and course corrections. Any MCP client — Claude Code, Codex, Cursor, etc. — can act as a Gate into the substrate. This lets parallel agents across different editors share context safely, using atomic locks to claim tasks without stepping on each other.
 
@@ -216,8 +216,11 @@ guild quest journal QUEST-42 "switched to exponential backoff after mock-clock t
 
 `lore appraise` is the discipline that keeps guild sharp: search
 before you research, so knowledge accretes instead of duplicating.
-Appraise runs hybrid (BM25 + vector RRF) the moment your corpus is
-indexed.
+Appraise combines BM25 with available fresh vectors, including partially
+indexed corpora. It returns evidence candidates whose relevance you should
+check before using them. See [retrieval policy and evaluations](docs/RETRIEVAL.md)
+and the [coordinated upgrade instructions](docs/retrieval-upgrade.md) for
+existing installations.
 
 ### Act 3 — parting
 
