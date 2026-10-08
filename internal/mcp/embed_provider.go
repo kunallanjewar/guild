@@ -11,6 +11,10 @@ import (
 	"github.com/mathomhaus/guild/internal/lore"
 )
 
+// embedInitRetryDelay bounds repeated initialization work after a transient
+// failure, while keeping an enabled provider recoverable during the session.
+const embedInitRetryDelay = time.Second
+
 // embedProvider is the MCP-adapter lazy resolver for *lore.EmbedDeps.
 // It exists because the MCP server is long-lived while meta.embedder_state
 // can flip mid-session (the most common trigger: the user runs `guild
@@ -23,15 +27,22 @@ import (
 // Contract: Resolve is called at the top of every lore tool handler.
 // On the common path (state unchanged since last resolve) it is a
 // single indexed meta SELECT plus an RLock acquire, dominated by the
-// SELECT. On a state transition it upgrades to a write lock, calls
-// lore.WireEmbedDeps to reconstruct, caches the result, and emits one
-// structured slog line.
+// SELECT. State transitions and retries use a separate constructor lock,
+// so only one lore.WireEmbedDeps call can publish a cache at a time.
+// Failed enabled initialization is retried after a bounded cooldown.
 //
 // Hexagonal: the provider is an adapter concern. Keeps internal/lore
 // free of adapter-specific lifecycle code; the lore handlers see a
 // *lore.EmbedDeps exactly as they did before.
 type embedProvider struct {
-	// mu guards cached, lastState, and lastModelID. RWMutex is
+	// resolveMu permits only one constructor at a time. Cache reads remain
+	// independent of slow extraction, probing, or index loading.
+	resolveMu sync.Mutex
+	// retryAfter bounds enabled-state retries after a transient nil result.
+	// Disabled-state nil results remain cached until metadata changes.
+	retryAfter time.Time
+
+	// mu guards cached, lastState, lastModelID, and retryAfter. RWMutex is
 	// sufficient for the access pattern: many concurrent readers
 	// (every lore tool call), a rare writer (state flip).
 	mu sync.RWMutex
@@ -92,8 +103,8 @@ func newEmbedProvider(openDB func(ctx context.Context) (*sql.DB, error), logger 
 }
 
 // ResolveEmbedDeps returns the current *lore.EmbedDeps for this MCP
-// server, reconstructing it if meta.embedder_state has changed since
-// the last resolve. A nil return is the documented Phase-0 fallback
+// server, reconstructing it after a metadata change or a failed enabled
+// initialization whose retry cooldown has elapsed. A nil return is the documented Phase-0 fallback
 // path and every lore handler tolerates it.
 //
 // This method satisfies the interface internal/lore embedFromDeps type-
@@ -125,39 +136,34 @@ func (p *embedProvider) ResolveEmbedDeps(ctx context.Context) *lore.EmbedDeps {
 		return p.cached
 	}
 
-	// Hot path: nothing changed. Read-lock, compare, return cache.
+	if cached, ok := p.cachedForState(state, modelID); ok {
+		return cached
+	}
+
+	p.resolveMu.Lock()
+	defer p.resolveMu.Unlock()
+	// A constructor may have finished, or metadata may have changed, while
+	// this caller waited. Refresh both before deciding whether to build.
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 2*time.Second)
+	state, modelID, err = p.readMetaState(refreshCtx)
+	refreshCancel()
+	if err != nil {
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		return p.cached
+	}
+	if cached, ok := p.cachedForState(state, modelID); ok {
+		return cached
+	}
 	p.mu.RLock()
-	if p.lastState == state && p.lastModelID == modelID && p.lastState != "" {
-		cached := p.cached
-		p.mu.RUnlock()
-		return cached
-	}
-	priorState := p.lastState
+	priorState, priorModel := p.lastState, p.lastModelID
 	p.mu.RUnlock()
-
-	// Slow path: state changed (or first resolve). Upgrade to write
-	// lock. A second goroutine may race us here; we re-check under
-	// the write lock and skip the reconstruct if the peer already
-	// stored the same state. Reconstruct is idempotent, so two
-	// concurrent reconstructs that both succeed and store the same
-	// value is still correct; the re-check just saves the wasted
-	// probe + LoadFromDB.
-	p.mu.Lock()
-	if p.lastState == state && p.lastModelID == modelID && p.lastState != "" {
-		cached := p.cached
-		p.mu.Unlock()
-		return cached
-	}
-	p.mu.Unlock()
-
-	// Construct outside the lock: WireEmbedDeps opens a DB handle,
-	// probes the extractor, and loads the index. All of those are
-	// long enough to hurt latency for concurrent readers if held
-	// under the write lock. The cached-store step below is a quick
-	// Lock/Unlock.
 	reason := "initial_boot_enabled"
 	if priorState != "" {
 		reason = "state_flip_mid_session"
+		if priorState == state && priorModel == modelID {
+			reason = "retry_after_init_failure"
+		}
 	}
 	newDeps := p.reconstruct(ctx, reason)
 
@@ -165,9 +171,24 @@ func (p *embedProvider) ResolveEmbedDeps(ctx context.Context) *lore.EmbedDeps {
 	p.cached = newDeps
 	p.lastState = state
 	p.lastModelID = modelID
+	p.retryAfter = time.Time{}
+	if newDeps == nil && state == "enabled" {
+		p.retryAfter = time.Now().Add(embedInitRetryDelay)
+	}
 	p.mu.Unlock()
-
 	return newDeps
+}
+
+// cachedForState retains successes and explicit disables, but lets a failed
+// enabled initialization recover without requiring a metadata flip or restart.
+func (p *embedProvider) cachedForState(state, modelID string) (*lore.EmbedDeps, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.lastState != "" && p.lastState == state && p.lastModelID == modelID &&
+		(p.cached != nil || state != "enabled" || time.Now().Before(p.retryAfter)) {
+		return p.cached, true
+	}
+	return nil, false
 }
 
 // reconstruct opens lore.db and calls lore.WireEmbedDeps. Returns nil
