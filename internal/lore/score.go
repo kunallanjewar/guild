@@ -85,7 +85,13 @@ func CombineScore(bm25, ageDays float64, cfg ScoringConfig) float64 {
 // s. Used both for exact-title comparison and token extraction so the
 // two signals agree on what "the query" is.
 func normalizeQuery(s string) string {
-	return whitespaceRE.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), " ")
+	normalized := strings.ToLower(strings.TrimSpace(s))
+	// Most titles already use single spaces. Preserve the regexp's exact
+	// whitespace semantics while avoiding its scan and output allocation.
+	if !strings.Contains(normalized, "  ") && !strings.ContainsAny(normalized, "\t\n\r\f") {
+		return normalized
+	}
+	return whitespaceRE.ReplaceAllString(normalized, " ")
 }
 
 // tokenSet returns the set of \w+ tokens in s, lower-cased.
@@ -115,17 +121,30 @@ func isSubset(a, b map[string]struct{}) bool {
 // for one entry against the user's query. The two boost levels are
 // additive with the base BM25+recency score.
 func TitleBoost(title, query string, cfg ScoringConfig) float64 {
-	qNorm := normalizeQuery(query)
-	if qNorm == "" {
+	return prepareTitleQuery(query).boost(title, cfg)
+}
+
+type preparedTitleQuery struct {
+	normalized string
+	tokens     map[string]struct{}
+}
+
+// prepareTitleQuery shares query normalization and token extraction across
+// a candidate batch; title normalization remains per distinct entry.
+func prepareTitleQuery(query string) preparedTitleQuery {
+	normalized := normalizeQuery(query)
+	return preparedTitleQuery{normalized: normalized, tokens: tokenSet(normalized)}
+}
+
+func (q preparedTitleQuery) boost(title string, cfg ScoringConfig) float64 {
+	if q.normalized == "" {
 		return 0
 	}
-	tNorm := normalizeQuery(title)
-	if tNorm == qNorm {
+	normalizedTitle := normalizeQuery(title)
+	if normalizedTitle == q.normalized {
 		return cfg.TitleMatchBoost
 	}
-	qTokens := tokenSet(qNorm)
-	tTokens := tokenSet(tNorm)
-	if isSubset(qTokens, tTokens) {
+	if isSubset(q.tokens, tokenSet(normalizedTitle)) {
 		return cfg.TitleTokenBoost
 	}
 	return 0

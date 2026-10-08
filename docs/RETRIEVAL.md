@@ -70,3 +70,13 @@ The vector report sweeps similarity cutoffs as diagnostics without choosing a pr
 These small, invented examples do not calibrate a universal threshold. Raising a cutoff suppresses useful paraphrases as well as unsupported questions. The policy therefore abstains from asserting answerability, preserves useful semantic candidates, and reports negative candidate rates honestly. It does not promise automatic semantic no-answer detection.
 
 The BGE query instruction prefix changed none of the held-out rankings. Five pinned embedding-parity cases passed with worst cosine 1.000000. A controlled tail-detail probe gave two summaries identical first-512-token tensors and identical vectors despite different facts after that window. For a question about the omitted detail, approximate relevance was 0.595 for the truncated representation and 0.802 for a focused detail representation. This establishes the tail-loss mechanism, not a validated general chunking strategy. FTS still indexes summary tails. No default prefix, representation, model identity or reindex policy changes on this evidence; any such change needs broader held-out testing and explicit vector identity migration.
+
+## Performance checks
+
+`appraise_bench_test.go` measures a 1,000-entry eligible scan, sorting 120 candidates, and complete lexical appraise including access telemetry. Query normalization and query tokens are shared across each candidate batch; exact-title flags are prepared before sorting. Hydration does not compute scores that its callers immediately replace. The complete hybrid candidate union and ranking policy remain intact.
+
+On one development machine, three-run medians before/after these allocation reductions were 2.97/0.60 ms for the eligible scan, 2.89/0.037 ms for sorting, and 6.38/3.71 ms for lexical appraise. These synthetic timings isolate implementation costs; they are not a model-inference or production latency claim. Reproduce with:
+
+```sh
+go test ./internal/lore -run '^$' -bench 'Benchmark(EligibleEntryIDs|SortAppraiseResults|AppraiseLexical)' -benchmem -count 3
+```

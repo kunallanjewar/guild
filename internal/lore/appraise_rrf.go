@@ -89,7 +89,7 @@ func appraiseRRF(ctx context.Context, db *sql.DB, params *AppraiseParams, now ti
 	// Fuse the complete candidate union before hydration/title ordering. An
 	// exact lexical match must not disappear behind a premature fused limit.
 	fused := embed.FuseBestRank(a, b, 0)
-	results, err := hydrateRankedEntries(ctx, db, params, now, scoring, fused)
+	results, err := hydrateRankedEntries(ctx, db, params, now, fused)
 	if err != nil {
 		return nil, false, err
 	}
@@ -145,6 +145,7 @@ func eligibleEntryIDs(ctx context.Context, db *sql.DB, params *AppraiseParams, n
 	}
 	defer func() { _ = rows.Close() }()
 	allowed = map[int64]bool{}
+	queryNorm := normalizeQuery(params.Query)
 	for rows.Next() {
 		var id int64
 		var title string
@@ -152,7 +153,7 @@ func eligibleEntryIDs(ctx context.Context, db *sql.DB, params *AppraiseParams, n
 			return nil, nil, err
 		}
 		allowed[id] = true
-		if normalizeQuery(title) == normalizeQuery(params.Query) {
+		if normalizeQuery(title) == queryNorm {
 			exact = append(exact, id)
 		}
 	}
@@ -174,17 +175,18 @@ func lexicalCandidates(ctx context.Context, db *sql.DB, params *AppraiseParams, 
 	}
 	results := make([]AppraiseResult, 0, len(entries)+len(exact))
 	seen := map[int64]bool{}
+	query := prepareTitleQuery(params.Query)
 	for i, e := range entries {
-		results = append(results, AppraiseResult{Entry: e, Score: Score(e, params.Query, bm25s[i], scoring, now), BM25: bm25s[i], LexicalMatch: true})
+		results = append(results, AppraiseResult{Entry: e, Score: CombineScore(bm25s[i], daysBetween(e.CreatedAt, now), scoring) + query.boost(e.Title, scoring), BM25: bm25s[i], LexicalMatch: true})
 		seen[e.ID] = true
 	}
-	exactRows, err := hydrateRankedEntries(ctx, db, params, now, scoring, exact)
+	exactRows, err := hydrateRankedEntries(ctx, db, params, now, exact)
 	if err != nil {
 		return nil, false, err
 	}
 	for _, r := range exactRows {
 		if !seen[r.Entry.ID] {
-			r.Score = Score(r.Entry, params.Query, 0, scoring, now)
+			r.Score = CombineScore(0, daysBetween(r.Entry.CreatedAt, now), scoring) + query.boost(r.Entry.Title, scoring)
 			r.LexicalMatch = true
 			results = append(results, r)
 		}
@@ -197,9 +199,17 @@ func lexicalCandidates(ctx context.Context, db *sql.DB, params *AppraiseParams, 
 }
 
 func sortAppraiseResults(results []AppraiseResult, query string, scoring ScoringConfig) {
+	var exact map[*Entry]bool
+	if scoring.TitleMatchBoost > 0 {
+		exact = make(map[*Entry]bool, len(results))
+		queryNorm := normalizeQuery(query)
+		for _, result := range results {
+			exact[result.Entry] = normalizeQuery(result.Entry.Title) == queryNorm
+		}
+	}
 	sort.SliceStable(results, func(i, j int) bool {
 		if scoring.TitleMatchBoost > 0 {
-			ie, je := normalizeQuery(results[i].Entry.Title) == normalizeQuery(query), normalizeQuery(results[j].Entry.Title) == normalizeQuery(query)
+			ie, je := exact[results[i].Entry], exact[results[j].Entry]
 			if ie != je {
 				return ie
 			}
@@ -223,8 +233,9 @@ func populateProjectCounts(out *AppraiseOutput, all bool) {
 
 // Hydration retains filters as a second safety check if rows change while
 // retrieval runs. Candidate selection, rather than this check, prevents
-// excluded rows from consuming a limited arm's slots.
-func hydrateRankedEntries(ctx context.Context, db *sql.DB, params *AppraiseParams, now time.Time, scoring ScoringConfig, ids []int64) ([]AppraiseResult, error) {
+// excluded rows from consuming a limited arm's slots. Callers supply the
+// score; computing a placeholder here would immediately be discarded.
+func hydrateRankedEntries(ctx context.Context, db *sql.DB, params *AppraiseParams, now time.Time, ids []int64) ([]AppraiseResult, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -256,7 +267,7 @@ func hydrateRankedEntries(ctx context.Context, db *sql.DB, params *AppraiseParam
 	results := make([]AppraiseResult, 0, len(ids))
 	for _, id := range ids {
 		if e, ok := byID[id]; ok {
-			results = append(results, AppraiseResult{Entry: e, Score: Score(e, params.Query, 0, scoring, now)})
+			results = append(results, AppraiseResult{Entry: e})
 		}
 	}
 	return results, nil
