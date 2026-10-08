@@ -19,7 +19,7 @@ import (
 
 var recoveryBackendSequence atomic.Uint64
 
-func recoveryProvider(t *testing.T, factory embed.EmbedderFactory) (*embedProvider, string) {
+func recoveryProvider(t *testing.T, factory embed.EmbedderFactory) (provider *embedProvider, dbPath string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "provider.db")
 	seedLoreDB(t, path)
