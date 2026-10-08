@@ -1,6 +1,6 @@
 -- Replay the idempotent sleep schema for databases whose version 009
 -- recorded lore_body instead. Historical version descriptions remain intact.
--- 009_sleep_journal.up.sql
+-- 013_reconcile_sleep_journal.up.sql
 --
 -- Durable journal for autonomous maintenance ("sleep") passes, the
 -- substrate consumed by internal/sleep. Two tables:
@@ -12,8 +12,7 @@
 --   sleep_ops     one row per mutation (or attempted mutation) inside
 --                 a pass: which step produced it, the policy verdict
 --                 (auto-applied vs. posted for approval), the op kind,
---                 a display-id target (e.g. "LORE-12<-LORE-40" or
---                 "QUEST-401"), JSON detail, and an optional JSON
+--                 a display identifier for the target, JSON detail, and an optional JSON
 --                 inverse payload describing how to manually reverse
 --                 an auto-applied op.
 --
