@@ -46,7 +46,8 @@ type RunInput struct {
 // outcome. Serialised for the --agent / MCP JSON envelope and rendered for
 // humans by the formatters below.
 type RunReport struct {
-	Grid GridResult `json:"grid"`
+	Grid      GridResult      `json:"grid"`
+	Relevance RelevanceReport `json:"relevance"`
 	// ParityChecked is false when SkipParity was set.
 	ParityChecked bool `json:"parity_checked"`
 	// ParityDrift is "" when the live ranking matches the golden fixture, or
@@ -87,7 +88,11 @@ func runHandler(ctx context.Context, _ command.Deps, in RunInput) (RunReport, er
 	if err != nil {
 		return RunReport{}, err
 	}
-	rep := RunReport{Grid: grid, ParityChecked: !in.SkipParity}
+	quality, err := RunRelevance(ctx, RelevanceOptions{})
+	if err != nil {
+		return RunReport{}, err
+	}
+	rep := RunReport{Grid: grid, Relevance: quality, ParityChecked: !in.SkipParity}
 
 	if !in.SkipParity {
 		drift, err := checkParity(ctx)
@@ -102,7 +107,7 @@ func runHandler(ctx context.Context, _ command.Deps, in RunInput) (RunReport, er
 	if cfg.MinGreen > 0 {
 		greenOK = grid.GreenCount >= cfg.MinGreen
 	}
-	failed := !greenOK || rep.ParityDrift != ""
+	failed := !greenOK || rep.ParityDrift != "" || !quality.RelevancePassed()
 	rep.Failed = failed && strict
 	if rep.Failed {
 		return rep, fmt.Errorf("eval: gate failed: %s", strictReason(grid, rep))
@@ -148,6 +153,9 @@ func strictReason(grid GridResult, rep RunReport) string {
 	if rep.ParityDrift != "" {
 		parts = append(parts, "parity drift: "+rep.ParityDrift)
 	}
+	if !rep.Relevance.RelevancePassed() {
+		parts = append(parts, fmt.Sprintf("held-out quality below hit@5 85%% / MRR 0.80 floors (%.1f%% / %.3f)", 100*rep.Relevance.Metrics.HitAt5, rep.Relevance.Metrics.MRR))
+	}
 	if len(parts) == 0 {
 		return "unmet green floor"
 	}
@@ -179,6 +187,8 @@ func formatRun(s lineSink, o RunReport) string {
 		}
 		b.WriteString(s.Line("✗", "  x", fmt.Sprintf("%s: red — %s", v.Probe, v.Reason)))
 	}
+	m := o.Relevance.Metrics
+	fmt.Fprintf(&b, "held-out lexical: hit@1/5/10 %.1f/%.1f/%.1f%%; MRR %.3f; negative candidate rate %.1f%% (answerability unverified)\n", 100*m.HitAt1, 100*m.HitAt5, 100*m.HitAt10, m.MRR, 100*m.NegativeCandidateRate)
 	if o.ParityChecked {
 		if o.ParityDrift == "" {
 			b.WriteString(s.Line("🔒", "[ok]", "parity: ranking matches golden fixture"))

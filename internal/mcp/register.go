@@ -124,6 +124,7 @@ func (c *serverCore) buildMCPCommandDeps() command.Deps {
 func (c *serverCore) buildMCPLoreDeps() command.Deps {
 	d := command.Deps{
 		OpenDB:           openLoreDB,
+		OpenQuestDB:      openQuestDB,
 		ResolveProj:      c.resolveProjectAutoBootstrap,
 		Now:              time.Now,
 		RecordTelemetry:  c.recordMCPTelemetry,

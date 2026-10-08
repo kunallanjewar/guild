@@ -44,8 +44,21 @@ func blockingHandler(_ context.Context, _ ShimPreamble, conn io.ReadWriteCloser)
 // channel Run's result lands on.
 func startDaemon(t *testing.T, ctx context.Context, srv *Server, socketPath string) chan error {
 	t.Helper()
+	runCtx, cancel := context.WithCancel(ctx)
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Run(ctx) }()
+	done := make(chan struct{})
+	// Registered after temporary HOME/socket cleanup, so LIFO ordering joins
+	// Run before either artifact location can be restored or removed. The
+	// dedicated done signal remains available even if a test consumes errCh.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("daemon Run did not finish during test cleanup")
+		}
+	})
+	go func() { defer close(done); errCh <- srv.Run(runCtx) }()
 
 	testsupport.WaitReady(t, "socket "+socketPath+" dialable and discovery written", func() bool {
 		select {
@@ -558,4 +571,74 @@ func TestRun_StatusPresenceEmptyWhenNoRegistry(t *testing.T) {
 	if st.LeasesReaped != 0 {
 		t.Errorf("LeasesReaped = %d, want 0 without a reaper", st.LeasesReaped)
 	}
+}
+
+// Cleanup must finish Run before t.Setenv restores HOME. Otherwise the old
+// daemon's artifact removal can target the next test's newly written discovery.
+func TestStartDaemonCleanupJoinsRunBeforeRestoringHome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var exited chan error
+	t.Run("first home", func(t *testing.T) {
+		setHome(t)
+		sock := shortSocketPath(t)
+		// This cleanup was registered before startDaemon's. It executes after
+		// the helper joins Run, even if a consumer already drained errCh.
+		t.Cleanup(func() {
+			select {
+			case err := <-exited:
+				if err != nil {
+					t.Errorf("Run exit=%v", err)
+				}
+			default:
+				t.Error("test cleanup returned before Run exited")
+			}
+		})
+		srv, err := NewServer(Config{Version: "first", SocketPath: sock, Sessions: blockingHandler, Logger: quietLogger()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		exited = startDaemon(t, ctx, srv, sock)
+	})
+	t.Run("next home", func(t *testing.T) {
+		setHome(t)
+		sock := shortSocketPath(t)
+		srv, err := NewServer(Config{Version: "next", SocketPath: sock, Sessions: blockingHandler, Logger: quietLogger()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		startDaemon(t, context.Background(), srv, sock)
+		// The first parent context is still alive until here. With the old
+		// helper this triggered asynchronous removal against the next HOME.
+		cancel()
+		discovery, err := ReadDiscovery()
+		if err != nil || discovery == nil || discovery.SocketPath != sock || discovery.Version != "next" {
+			t.Fatalf("previous cleanup removed next discovery: %+v %v", discovery, err)
+		}
+	})
+}
+
+func TestStartDaemonCleanupDoesNotRequireUndrainedResult(t *testing.T) {
+	t.Run("consumed result", func(t *testing.T) {
+		setHome(t)
+		sock := shortSocketPath(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		srv, err := NewServer(Config{Version: "consumed", SocketPath: sock, Sessions: blockingHandler, Logger: quietLogger()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := startDaemon(t, ctx, srv, sock)
+		cancel()
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("daemon did not stop")
+		}
+		// The helper's cleanup now runs with an empty result channel. Its
+		// independent done signal must still allow immediate completion.
+	})
 }

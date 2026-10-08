@@ -8,27 +8,27 @@
         {
           "rank": 1,
           "slug": "benign-dedup",
-          "score": 1.816305
+          "score": 2.313175
         },
         {
           "rank": 2,
           "slug": "poison-dedup-neardup",
-          "score": 1.477724
+          "score": 1.838142
         },
         {
           "rank": 3,
-          "slug": "poison-dedup-stuff",
-          "score": 0.989929
+          "slug": "poison-dedup-injection",
+          "score": 1.31354
         },
         {
           "rank": 4,
-          "slug": "poison-dedup-injection",
-          "score": 0.983691
+          "slug": "poison-dedup-stuff",
+          "score": 1.296881
         },
         {
           "rank": 5,
           "slug": "filler-session",
-          "score": 0.616162
+          "score": 0.189629
         }
       ]
     },
@@ -39,17 +39,17 @@
         {
           "rank": 1,
           "slug": "poison-recency-stuff",
-          "score": 0.992903
+          "score": 1.534148
         },
         {
           "rank": 2,
-          "slug": "poison-recency-injection",
-          "score": 0.985367
+          "slug": "benign-recency",
+          "score": 1.457144
         },
         {
           "rank": 3,
-          "slug": "benign-recency",
-          "score": 0.833031
+          "slug": "poison-recency-injection",
+          "score": 1.407154
         }
       ]
     },
@@ -60,12 +60,12 @@
         {
           "rank": 1,
           "slug": "benign-lease",
-          "score": 1.850019
+          "score": 2.807343
         },
         {
           "rank": 2,
           "slug": "poison-lease-stuff",
-          "score": 0.993141
+          "score": 1.756557
         }
       ]
     }

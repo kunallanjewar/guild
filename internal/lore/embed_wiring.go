@@ -26,9 +26,9 @@ type EmbedWireOptions struct {
 	Async bool
 	// LoadIndex, when true, eagerly reads lore_vectors into a
 	// per-process Index at wire time. MCP startup sets true (paid
-	// once; every appraise reuses it). CLI bootstrap sets false to
-	// avoid the 10-50 ms scan on every short-lived invocation; CLI
-	// appraise falls through to BM25-only unless the caller opts in.
+	// once; every appraise reuses it). CLI appraise also sets true:
+	// semantic search requires an index. CLI write bootstrap sets false
+	// because those handlers only write vectors.
 	LoadIndex bool
 	// Logger receives one-line diagnostics: wired state + reasons.
 	// Nil uses slog.Default.
@@ -192,9 +192,9 @@ func WireEmbedDeps(ctx context.Context, db *sql.DB, opts EmbedWireOptions) (*Emb
 
 	// Index construction. LoadFromDB is cheap per the ADR-003 10 ms/1k
 	// rows bench budget, but paying it on every CLI invocation is
-	// pure overhead for the short-lived process. Callers set
-	// LoadIndex=true only when they expect the index to be reused
-	// across many calls (the MCP server).
+	// unnecessary overhead for write-only processes. Search callers set
+	// LoadIndex=true even for a single CLI query; there is no SQL TopK
+	// alternative when Index is nil.
 	var idx *embed.Index
 	indexLen := 0
 	if opts.LoadIndex {
@@ -202,10 +202,8 @@ func WireEmbedDeps(ctx context.Context, db *sql.DB, opts EmbedWireOptions) (*Emb
 		n, lerr := idx.LoadFromDB(ctx, db)
 		if lerr != nil {
 			// Fail safe: log and continue without the index. The
-			// Appraise path still runs the RRF arm via live
-			// embedding + per-call vector lookup; it just loses the
-			// in-memory TopK acceleration. This is better than
-			// failing startup.
+			// Appraise path falls back to lexical retrieval without
+			// a usable index. This is better than failing startup.
 			logger.Warn("embedder inactive: index load failed",
 				slog.String("err", lerr.Error()),
 				slog.String("model_id", boundModelID),

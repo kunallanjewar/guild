@@ -15,7 +15,7 @@ import (
 )
 
 // defaultReadyCeiling bounds a readiness wait when the test sets no
-// deadline (go test without -timeout). It is deliberately generous:
+// deadline or when the package deadline is farther away. It is generous:
 // the assertion is "the daemon eventually comes ready", and a slow,
 // heavily loaded runner is not a product failure. The poll exits the
 // instant the predicate passes, so this ceiling only governs the
@@ -36,9 +36,8 @@ const deadlineMargin = 2 * time.Second
 // ceiling elapses first it fails the test via t.Fatalf with what,
 // describing the readiness signal that never arrived.
 //
-// The ceiling is derived from t.Deadline() when the test sets one
-// (reserving a small margin so this helper, not the runner, reports
-// the failure), and otherwise falls back to a generous fixed budget.
+// The ceiling is capped at 30s and shortened by t.Deadline() when needed,
+// reserving a margin so this helper, not the runner, reports the failure.
 // Polling is on a fixed tick; the wait returns as soon as ready
 // reports true, so a healthy daemon incurs at most one tick of delay.
 //
@@ -69,19 +68,20 @@ func WaitReady(t *testing.T, what string, ready func() bool) {
 	}
 }
 
-// ceiling returns the readiness budget for t: a margin-reduced slice of
-// the test deadline when one is set, otherwise the fixed fallback. A
-// deadline so near it leaves no usable margin still yields a tiny
-// positive budget so the loop polls at least once and reports its own
-// failure.
+// ceiling caps every wait independently of the package timeout while keeping
+// a margin for reporting the failure before the test runner's deadline.
 func ceiling(t *testing.T) time.Duration {
-	dl, ok := t.Deadline()
-	if !ok {
+	deadline, ok := t.Deadline()
+	return readinessBudget(time.Now(), deadline, ok)
+}
+
+func readinessBudget(now, deadline time.Time, hasDeadline bool) time.Duration {
+	if !hasDeadline {
 		return defaultReadyCeiling
 	}
-	budget := time.Until(dl) - deadlineMargin
+	budget := deadline.Sub(now) - deadlineMargin
 	if budget < readyTick {
 		budget = readyTick
 	}
-	return budget
+	return min(budget, defaultReadyCeiling)
 }

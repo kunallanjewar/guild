@@ -81,6 +81,9 @@ func loadCLIConfig(cmd *cobra.Command) (*config.Config, error) {
 // appraise
 // ---------------------------------------------------------------------------
 
+// Search loads an index; write commands use their separate lightweight wiring.
+var wireAppraiseEmbedDeps = lore.WireEmbedDeps
+
 type appraiseFlags struct {
 	Project     string
 	Limit       int
@@ -105,7 +108,7 @@ func newAppraiseCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "appraise QUERY",
 		Aliases: []string{"check"},
-		Short:   "hybrid search (BM25 + recency + title-boost)",
+		Short:   "search lexical and semantic evidence candidates",
 		// Hook mode (--inject) may source the query from --query or the
 		// stdin JSON envelope, so the positional becomes optional there.
 		// Every other invocation keeps the legacy at-least-one-arg rule.
@@ -211,12 +214,10 @@ func runAppraise(cmd *cobra.Command, args []string, f appraiseFlags) error {
 		scoring.WRecency = f.WRecency
 	}
 
-	// Construct EmbedDeps against the already-open db so we reuse the
-	// connection for the meta probe. Async=false, LoadIndex=false:
-	// the CLI surface is short-lived; the Appraise RRF path embeds
-	// the query live and runs SQL TopK. Nil is fine: handler falls
-	// back to BM25+stopwords per ADR-003.
-	embedDeps, _, _ := lore.WireEmbedDeps(ctx, db, lore.EmbedWireOptions{Async: false, LoadIndex: false, Logger: newCLILogger()})
+	// Search requires the in-memory vector index. Reuse this connection for
+	// metadata and index loading; unavailable assets/runtime still select the
+	// lexical fallback. CLI writes use separate wiring without index loading.
+	embedDeps, _, _ := wireAppraiseEmbedDeps(ctx, db, lore.EmbedWireOptions{Async: false, LoadIndex: true, Logger: newCLILogger()})
 	out, err := lore.Appraise(ctx, db, lore.AppraiseParams{
 		Query:       query,
 		Limit:       f.Limit,
@@ -305,6 +306,7 @@ func renderAppraiseOutput(w io.Writer, out *lore.AppraiseOutput, query string, c
 	} else {
 		fmt.Fprintf(w, "%s %d entry(ies) appraised:\n\n", emoji, len(out.Results))
 	}
+	fmt.Fprintln(w, "  Evidence candidates; answer relevance is unverified.")
 	for _, r := range out.Results {
 		writeEntryBrief(w, r.Entry, out.ProjectCounts != nil)
 		fmt.Fprintln(w)
@@ -567,7 +569,8 @@ func init() {
 // resolved *EmbedDeps per ADR-003 nil-safety.
 func buildCLILoreDeps() command.Deps {
 	return command.Deps{
-		OpenDB: openLoreDB,
+		OpenDB:      openLoreDB,
+		OpenQuestDB: openQuestDB,
 		ResolveProj: func(ctx context.Context, argProject string) (string, error) {
 			db, err := openLoreDB(ctx)
 			if err != nil {
@@ -606,8 +609,8 @@ func cliLoreValidDays() map[string]int {
 // and returns the *lore.EmbedDeps (or nil) that every lore verb
 // handler will see via command.Deps.Embed. Uses Async=false (short-
 // lived process must not fire-and-forget Tx2) and LoadIndex=false
-// (scanning 10k rows on every CLI invocation is pure overhead; the
-// RRF path still runs via live embedding + SQL TopK when needed).
+// because write handlers do not need a search index. The appraise CLI
+// constructs its own dependencies with LoadIndex=true.
 //
 // Nil-return is the expected default on fresh clones, on Windows, and
 // until the user has run `guild init` against a binary built with

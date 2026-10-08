@@ -33,8 +33,8 @@ func TestDefaults(t *testing.T) {
 	if d.Scoring.WFTS != 0.7 {
 		t.Errorf("WFTS default: got %v want 0.7", d.Scoring.WFTS)
 	}
-	if d.Scoring.WRecency != 0.3 {
-		t.Errorf("WRecency default: got %v want 0.3", d.Scoring.WRecency)
+	if d.Scoring.WRecency != 0 {
+		t.Errorf("WRecency default: got %v want 0", d.Scoring.WRecency)
 	}
 	if d.Scoring.HalfLifeDays != 30 {
 		t.Errorf("HalfLifeDays default: got %v want 30", d.Scoring.HalfLifeDays)
@@ -94,8 +94,8 @@ w_fts = 0.5
 		t.Errorf("w_fts: got %v want 0.5", cfg.Scoring.WFTS)
 	}
 	// Untouched keys must remain at defaults.
-	if cfg.Scoring.WRecency != 0.3 {
-		t.Errorf("w_recency should be unchanged 0.3, got %v", cfg.Scoring.WRecency)
+	if cfg.Scoring.WRecency != 0 {
+		t.Errorf("w_recency should be unchanged 0, got %v", cfg.Scoring.WRecency)
 	}
 	if cfg.Scoring.HalfLifeDays != 30 {
 		t.Errorf("half_life_days should be unchanged 30, got %v", cfg.Scoring.HalfLifeDays)
@@ -271,7 +271,7 @@ func TestFlagLayerNilFlagSetIsNoop(t *testing.T) {
 //
 // Scenario:
 //
-//	Layer 1 (defaults):          WFTS=0.7  WRecency=0.3  HalfLifeDays=30  PrincipleMaxWords=60
+//	Layer 1 (defaults):          WFTS=0.7  WRecency=0  HalfLifeDays=30  PrincipleMaxWords=60
 //	Layer 2 (user config):       WFTS=0.6
 //	Layer 3 (repo config):       WRecency=0.2
 //	Layer 4 (env):               GUILD_PROJECT="envproj"  GUILD_NO_EMOJI=1
@@ -279,7 +279,7 @@ func TestFlagLayerNilFlagSetIsNoop(t *testing.T) {
 //
 //	Expected after merge:
 //	  WFTS             = 0.5  (flag wins over user config 0.6)
-//	  WRecency         = 0.2  (repo config wins over default 0.3)
+//	  WRecency         = 0.2  (repo config wins over default 0)
 //	  HalfLifeDays     = 30   (untouched: default)
 //	  PrincipleMaxWords= 60   (untouched: default)
 //	  Project          = "envproj"  (env)
@@ -341,7 +341,7 @@ func TestLoadPrecedenceTable(t *testing.T) {
 		want  interface{}
 	}{
 		{"WFTS (flag=0.5 beats user=0.6)", cfg.Scoring.WFTS, 0.5},
-		{"WRecency (repo=0.2 beats default=0.3)", cfg.Scoring.WRecency, 0.2},
+		{"WRecency (repo=0.2 beats default=0)", cfg.Scoring.WRecency, 0.2},
 		{"HalfLifeDays (untouched default=30)", cfg.Scoring.HalfLifeDays, float64(30)},
 		{"TitleMatchBoost (untouched default=1.0)", cfg.Scoring.TitleMatchBoost, 1.0},
 		{"TitleTokenBoost (untouched default=0.5)", cfg.Scoring.TitleTokenBoost, 0.5},

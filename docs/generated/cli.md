@@ -28,7 +28,7 @@ Every `guild <verb>` subcommand generated from the live cobra tree.
 - [`guild hooks sync`](#guild-hooks-sync) — regenerate per-harness hook settings from the base config
 - [`guild init`](#guild-init) — scaffold AGENTS.md and register this repo with guild
 - [`guild lore`](#guild-lore) — knowledge lifecycle (read/write/decay/supersede)
-- [`guild lore appraise`](#guild-lore-appraise) — hybrid search (BM25 + recency + title-boost)
+- [`guild lore appraise`](#guild-lore-appraise) — search lexical and semantic evidence candidates
 - [`guild lore archive`](#guild-lore-archive) — write snapshot.json for git-trackable project checkpoint (alias: export)
 - [`guild lore catalog`](#guild-lore-catalog) — bulk-import .md files as lore entries
 - [`guild lore commune`](#guild-lore-commune) — health report for oath bloat and duplicate lore
@@ -537,7 +537,7 @@ guild lore
 
 ## `guild lore appraise`
 
-hybrid search (BM25 + recency + title-boost)
+search lexical and semantic evidence candidates
 
 **Usage**
 
@@ -1496,7 +1496,7 @@ search quests by keyword or semantic paraphrase
 guild quest search QUERY... [flags]
 ```
 
-BM25+stopwords full-text search over quest subjects and spec notes. When quest vector coverage >= 90%, adds a semantic arm and RRF-fuses (k=60, same gate and fusion as lore_appraise). Returns up to 10 results. Replaces quest list --all | grep.
+BM25+stopwords full-text search over quest subjects and spec notes. When fresh quest vectors are available, adds a semantic arm and blends rankings while preserving strong results from either arm. Returns up to 10 results. Replaces quest list --all | grep.
 
 **Flags**
 
