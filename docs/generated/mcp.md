@@ -1438,7 +1438,7 @@ _no arguments_
 
 ## `quest_search`
 
-BM25+stopwords full-text search over quest subjects and spec notes. When quest vector coverage >= 90%, adds a semantic arm and RRF-fuses (k=60, same gate and fusion as lore_appraise). Returns up to 10 results. Replaces quest list --all | grep.
+BM25+stopwords full-text search over quest subjects and spec notes. When fresh quest vectors are available, adds a semantic arm and blends rankings while preserving strong results from either arm. Returns up to 10 results. Replaces quest list --all | grep.
 
 _no arguments_
 
