@@ -499,8 +499,12 @@ func TestQuantizeInt8_RoundTrip(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			blob := quantizeInt8(tc.in)
-			if len(blob) != len(tc.in) {
-				t.Errorf("len(blob) = %d, want %d", len(blob), len(tc.in))
+			want := len(tc.in)
+			if tc.name == "zero" || tc.name == "short" {
+				want = 0
+			}
+			if len(blob) != want {
+				t.Errorf("len(blob) = %d, want %d", len(blob), want)
 			}
 		})
 	}

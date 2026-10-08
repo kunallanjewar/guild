@@ -157,7 +157,10 @@ func WriteVector(ctx context.Context, db *sql.DB, deps HotDeps, entryID int64, s
 	}
 	qvec := Quantize(fvec)
 	if qvec == nil {
-		return WriteVectorResult{}, fmt.Errorf("embed/hot: quantize returned nil (len(fvec)=%d)", len(fvec))
+		if err := bumpEmbedErrorCount(ctx, db, corpus, "invalid_vector"); err != nil {
+			logger.Warn("embed/hot: record invalid vector failed", "err", err)
+		}
+		return WriteVectorResult{}, fmt.Errorf("embed/hot: quantize rejected nonfinite or zero vector")
 	}
 
 	// 2. Take a dedicated conn and BEGIN IMMEDIATE. Shares

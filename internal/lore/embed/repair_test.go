@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -276,6 +277,55 @@ func BenchmarkReadCoverageBulk(b *testing.B) {
 		c, err := ReadCoverage(ctx, db, projectedLore{}, "model", nil)
 		if err != nil || c.Fresh != 1000 {
 			b.Fatalf("coverage=%+v err=%v", c, err)
+		}
+	}
+}
+
+func TestVectorWritersRejectUnusableEncoderResults(t *testing.T) {
+	for _, path := range []string{"hot", "backfill"} {
+		for _, name := range []string{"zero", "rounds-to-zero", "nan", "infinity"} {
+			t.Run(path+"/"+name, func(t *testing.T) {
+				ctx := context.Background()
+				db, id := hotTestDB(t)
+				text := mustSourceText(t, db, LoreCorpus{}, id)
+				if _, err := db.Exec(`INSERT INTO lore_vectors VALUES(?,'old-model',384,zeroblob(384),123,'old-hash')`, id); err != nil {
+					t.Fatal(err)
+				}
+				encoder := repairEmbedder{fn: func(context.Context, string) ([]float32, error) {
+					vec := make([]float32, VecDim)
+					switch name {
+					case "rounds-to-zero":
+						vec[0] = 0.001
+					case "nan":
+						vec[0] = float32(math.NaN())
+					case "infinity":
+						vec[0] = float32(math.Inf(1))
+					}
+					return vec, nil
+				}}
+				if path == "hot" {
+					result, err := WriteVector(ctx, db, HotDeps{Embedder: encoder, ModelID: canonModelID}, id, text)
+					if err == nil || result.Written {
+						t.Fatalf("invalid hot result=%+v err=%v", result, err)
+					}
+				} else {
+					result, err := Backfill(ctx, BackfillOptions{DB: db, Embedder: encoder, ModelID: canonModelID})
+					if err != nil || result.Embedded != 0 || result.Failed != 1 {
+						t.Fatalf("invalid backfill result=%+v err=%v", result, err)
+					}
+				}
+				var hash string
+				var timestamp int
+				if err := db.QueryRow(`SELECT content_hash,encoded_at FROM lore_vectors WHERE entry_id=?`, id).Scan(&hash, &timestamp); err != nil {
+					t.Fatal(err)
+				}
+				if hash != "old-hash" || timestamp != 123 {
+					t.Fatal("invalid output replaced existing vector")
+				}
+				if got := readMetaInt(t, db, "vector_epoch"); got != 0 {
+					t.Fatalf("invalid output advanced epoch: %d", got)
+				}
+			})
 		}
 	}
 }

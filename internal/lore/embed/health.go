@@ -417,6 +417,9 @@ func RebuildVectors(ctx context.Context, db *sql.DB, projectID string, embedder 
 
 		// Quantize float32 -> int8.
 		blob := quantizeInt8(vec)
+		if blob == nil {
+			continue
+		}
 
 		// Compute content hash (SHA-256 of the summary text).
 		contentHash := contentHashOf(e.summary)
@@ -557,33 +560,17 @@ func isEmbedBusyErr(msg string) bool {
 		strings.Contains(msg, "database is locked")
 }
 
-// quantizeInt8 converts a float32 vector to a raw int8 blob using symmetric
-// per-vector quantization (scale = max(abs) / 127). Matches the int8
-// storage convention referenced in ADR-003.
+// quantizeInt8 applies the canonical finite, nonzero quantization contract.
 func quantizeInt8(v []float32) []byte {
-	if len(v) == 0 {
+	quant := Quantize(v)
+	if quant == nil {
 		return nil
 	}
-	maxAbs := float32(0)
-	for _, x := range v {
-		a := x
-		if a < 0 {
-			a = -a
-		}
-		if a > maxAbs {
-			maxAbs = a
-		}
+	blob := make([]byte, len(quant))
+	for i, q := range quant {
+		blob[i] = byte(q)
 	}
-	out := make([]byte, len(v))
-	if maxAbs == 0 {
-		return out
-	}
-	scale := 127.0 / maxAbs
-	for i, x := range v {
-		q := int8(x * scale)
-		out[i] = byte(q)
-	}
-	return out
+	return blob
 }
 
 // contentHashOf returns a hex-encoded SHA-256 of the text, used as the

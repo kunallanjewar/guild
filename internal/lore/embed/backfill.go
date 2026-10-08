@@ -513,7 +513,7 @@ func insertVectorRow(ctx context.Context, db *sql.DB, corpus VectorCorpus, entry
 
 	quant := Quantize(vec)
 	if quant == nil {
-		return fmt.Errorf("quantize: got %d float32, want %d", len(vec), VecDim)
+		return fmt.Errorf("quantize: invalid shape, nonfinite or zero vector (dim=%d)", len(vec))
 	}
 	result, err := writeEncodedTx(ctx, conn, corpus, entry.ID, entry.Summary, quant, modelID)
 	if err != nil {
