@@ -305,6 +305,7 @@ func renderAppraiseOutput(w io.Writer, out *lore.AppraiseOutput, query string, c
 	} else {
 		fmt.Fprintf(w, "%s %d entry(ies) appraised:\n\n", emoji, len(out.Results))
 	}
+	fmt.Fprintln(w, "  Evidence candidates; answer relevance is unverified.")
 	for _, r := range out.Results {
 		writeEntryBrief(w, r.Entry, out.ProjectCounts != nil)
 		fmt.Fprintln(w)

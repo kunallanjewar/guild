@@ -293,7 +293,7 @@ func baseDefaults() Config {
 	return Config{
 		Scoring: ScoringConfig{
 			WFTS:            0.7,
-			WRecency:        0.3,
+			WRecency:        0,
 			HalfLifeDays:    30,
 			TitleMatchBoost: 1.0,
 			TitleTokenBoost: 0.5,

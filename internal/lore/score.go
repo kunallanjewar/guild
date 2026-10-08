@@ -29,12 +29,15 @@ type ScoringConfig struct {
 	TitleTokenBoost float64
 }
 
+// DefaultScoring ranks durable evidence by relevance. Recency is opt-in
+// through ScoringConfig or a since filter, rather than an implicit penalty
+// on old knowledge.
 // DefaultScoring returns the built-in scoring knobs.
 // Tests and callers that want the "no config, just score" path use this.
 func DefaultScoring() ScoringConfig {
 	return ScoringConfig{
 		WFTS:            0.7,
-		WRecency:        0.3,
+		WRecency:        0,
 		HalfLifeDays:    30,
 		TitleMatchBoost: 1.0,
 		TitleTokenBoost: 0.5,
@@ -52,16 +55,15 @@ var whitespaceRE = regexp.MustCompile(`\s+`)
 // wordRE extracts \w+ tokens.
 var wordRE = regexp.MustCompile(`\w+`)
 
-// NormalizeFTS maps FTS5's BM25 rank (more-negative = better) to [0, 1].
-//
-// FTS5's bm25() returns negative scores; 0 means "no match". The formula
-// 1 / (1 + exp(bm25)) is the sigmoid of the negative score: large negative
-// BM25 → score near 1, bm25 == 0 → score == 0.
+// NormalizeFTS maps negative FTS5 BM25 scores to nonnegative evidence.
+// log1p preserves the ordering even at large magnitudes, unlike the old
+// sigmoid which rounded strong matches to the same value. BM25 depends on
+// the query and corpus; this value is a ranking signal, not a probability.
 func NormalizeFTS(bm25 float64) float64 {
 	if bm25 >= 0 {
-		return 0.0
+		return 0
 	}
-	return 1.0 / (1.0 + math.Exp(bm25))
+	return math.Log1p(-bm25)
 }
 
 // NormalizeRecency returns an exponential-decay weight in [0, 1] given the

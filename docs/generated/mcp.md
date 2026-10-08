@@ -132,7 +132,7 @@ _no arguments_
 
 ## `lore_appraise`
 
-Search lore before storing new knowledge or spawning research subagents. Returns ranked entries with project, kind, age, and summary — if current results exist, use them instead of re-deriving.
+Search lore before storing new knowledge or spawning research subagents. Returns ranked entries with project, kind, age, and summary. Results are evidence candidates; verify relevance before using them. Scores are not answer confidence.
 
 _no arguments_
 
@@ -155,7 +155,7 @@ _no arguments_
       "type": "string"
     },
     "query": {
-      "description": "search query; BM25+recency+title-boost ranked",
+      "description": "search query; ranked lexical and semantic evidence candidates",
       "type": "string"
     },
     "since": {
