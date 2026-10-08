@@ -29,20 +29,27 @@ func ReadCoverage(ctx context.Context, db *sql.DB, corpus VectorCorpus, modelID 
 		corpus = LoreCorpus{}
 	}
 	c := Coverage{FreshIDs: make(map[int64]bool)}
-	query := fmt.Sprintf(`SELECT e.%s, v.entry_id, v.model_id, v.dim, length(v.vec), v.content_hash FROM %s e LEFT JOIN %s v ON v.entry_id=e.%s WHERE e.%s ORDER BY e.%s`, corpus.EntityIDColumn(), corpus.EntityTable(), corpus.VectorTable(), corpus.EntityIDColumn(), corpus.ActivePredicate(), corpus.EntityIDColumn()) //nolint:gosec // compile-time corpus accessors
-	rows, err := db.QueryContext(ctx, query)                                                                                                                                                                                                                                                                                //nolint:sqlcheck // compile-time corpus accessors
+	// Built-in adapters expose the canonical stored source column so the
+	// entity, vector and source hash are measured in one SQLite snapshot.
+	projection := "NULL"
+	if adapter, ok := corpus.(CorpusSourceProjection); ok {
+		projection = "e." + adapter.SourceTextColumn()
+	}
+	query := fmt.Sprintf(`SELECT e.%s, v.entry_id, v.model_id, v.dim, length(v.vec), v.content_hash, %s FROM %s e LEFT JOIN %s v ON v.entry_id=e.%s WHERE e.%s ORDER BY e.%s`, corpus.EntityIDColumn(), projection, corpus.EntityTable(), corpus.VectorTable(), corpus.EntityIDColumn(), corpus.ActivePredicate(), corpus.EntityIDColumn()) //nolint:gosec // compile-time corpus accessors
+
+	rows, err := db.QueryContext(ctx, query) //nolint:sqlcheck // compile-time corpus accessors
 	if err != nil {
 		return c, err
 	}
 	type row struct {
 		id                  int64
 		vectorID, dim, size sql.NullInt64
-		model, hash         sql.NullString
+		model, hash, source sql.NullString
 	}
 	var candidates []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.id, &r.vectorID, &r.model, &r.dim, &r.size, &r.hash); err != nil {
+		if err := rows.Scan(&r.id, &r.vectorID, &r.model, &r.dim, &r.size, &r.hash, &r.source); err != nil {
 			_ = rows.Close()
 			return c, err
 		}
@@ -55,7 +62,8 @@ func ReadCoverage(ctx context.Context, db *sql.DB, corpus VectorCorpus, modelID 
 	if err != nil {
 		return c, err
 	}
-	for _, r := range candidates {
+	for index := range candidates {
+		r := &candidates[index]
 		c.Eligible++
 		if !r.vectorID.Valid {
 			c.Missing++
@@ -66,9 +74,12 @@ func ReadCoverage(ctx context.Context, db *sql.DB, corpus VectorCorpus, modelID 
 			continue
 		}
 		c.Valid++
-		text, err := corpus.SourceText(ctx, db, r.id)
-		if err != nil {
-			return c, err
+		text := r.source.String
+		if projection == "NULL" {
+			text, err = corpus.SourceText(ctx, db, r.id)
+			if err != nil {
+				return c, err
+			}
 		}
 		if ContentHash(text) != r.hash.String {
 			c.Stale++
@@ -82,19 +93,17 @@ func ReadCoverage(ctx context.Context, db *sql.DB, corpus VectorCorpus, modelID 
 
 // sourceTextAt reads canonical source text on the locked writer connection.
 // Adapters with computed sources can implement SourceTextQuery to preserve their
-// exact assembly inside Tx2. Simple adapters default to body (or lore summary).
+// exact assembly inside Tx2. Unsupported adapters fail rather than assuming
+// a source column that may differ from their canonical text.
 func sourceTextAt(ctx context.Context, conn *sql.Conn, corpus VectorCorpus, id int64) (string, error) {
 	query := ""
-	if adapter, ok := corpus.(interface{ SourceTextQuery() string }); ok {
+	if adapter, ok := corpus.(CorpusTransactionalSource); ok {
 		query = adapter.SourceTextQuery()
 	}
 	if query == "" {
-		col := "body"
-		if corpus.Name() == "lore" {
-			col = "summary"
-		}
-		query = fmt.Sprintf(`SELECT %s FROM %s WHERE %s=?`, col, corpus.EntityTable(), corpus.EntityIDColumn()) //nolint:gosec // compile-time corpus accessors
+		return "", fmt.Errorf("embed: corpus %s has no transactional source lookup", corpus.Name())
 	}
+
 	var text string
 	err := conn.QueryRowContext(ctx, query, id).Scan(&text) //nolint:sqlcheck // compile-time adapter query
 	return text, err
@@ -105,9 +114,9 @@ func sourceTextAt(ctx context.Context, conn *sql.Conn, corpus VectorCorpus, id i
 func reconcileCoverageTx(ctx context.Context, conn *sql.Conn, corpus VectorCorpus, modelID string) error {
 	query := fmt.Sprintf(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN v.model_id=? AND v.dim=? AND length(v.vec)=? THEN 1 ELSE 0 END),0) FROM %s e LEFT JOIN %s v ON v.entry_id=e.%s WHERE e.%s`, corpus.EntityTable(), corpus.VectorTable(), corpus.EntityIDColumn(), corpus.ActivePredicate()) //nolint:gosec // compile-time corpus accessors
 	var den, num int64
-	if err := conn.QueryRowContext(ctx, query, modelID, VecDim, VecDim).Scan(&den, &num); err != nil {
+	if err := conn.QueryRowContext(ctx, query, modelID, VecDim, VecDim).Scan(&den, &num); err != nil { //nolint:sqlcheck // compile-time corpus accessors
 		return err
-	} //nolint:sqlcheck // compile-time corpus accessors
+	}
 	for _, kv := range []struct {
 		key   string
 		value int64
@@ -136,9 +145,9 @@ func writeEncodedTx(ctx context.Context, conn *sql.Conn, corpus VectorCorpus, id
 	}
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s=? AND %s`, corpus.EntityTable(), corpus.EntityIDColumn(), corpus.ActivePredicate()) //nolint:gosec // compile-time corpus accessors
 	var active int
-	if err := conn.QueryRowContext(ctx, query, id).Scan(&active); err != nil {
+	if err := conn.QueryRowContext(ctx, query, id).Scan(&active); err != nil { //nolint:sqlcheck // compile-time corpus accessors
 		return result, err
-	} //nolint:sqlcheck // compile-time corpus accessors
+	}
 	if active == 0 {
 		return result, nil
 	}
@@ -155,19 +164,19 @@ func writeEncodedTx(ctx context.Context, conn *sql.Conn, corpus VectorCorpus, id
 		blob[j] = byte(v)
 	}
 	query = fmt.Sprintf(`INSERT INTO %s(entry_id,model_id,dim,vec,encoded_at,content_hash) VALUES(?,?,?,?,?,?) ON CONFLICT(entry_id) DO UPDATE SET model_id=excluded.model_id,dim=excluded.dim,vec=excluded.vec,encoded_at=excluded.encoded_at,content_hash=excluded.content_hash WHERE model_id!=excluded.model_id OR dim!=excluded.dim OR length(vec)!=length(excluded.vec) OR content_hash!=excluded.content_hash`, corpus.VectorTable()) //nolint:gosec // compile-time corpus accessor
-	res, err := conn.ExecContext(ctx, query, id, modelID, VecDim, blob, time.Now().Unix(), hash)
+	res, err := conn.ExecContext(ctx, query, id, modelID, VecDim, blob, time.Now().Unix(), hash)                                                                                                                                                                                                                                                                                                                                             //nolint:sqlcheck // compile-time corpus accessors
 	if err != nil {
 		return result, err
-	} //nolint:sqlcheck // compile-time corpus accessor
+	}
 	changed, err := res.RowsAffected()
 	if err != nil {
 		return result, err
 	}
 	if stateCol := corpus.VectorStateColumn(); stateCol != "" {
 		query = fmt.Sprintf(`UPDATE %s SET %s='indexed' WHERE %s=?`, corpus.EntityTable(), stateCol, corpus.EntityIDColumn()) //nolint:gosec // compile-time corpus accessors
-		if _, err := conn.ExecContext(ctx, query, id); err != nil {
+		if _, err := conn.ExecContext(ctx, query, id); err != nil {                                                           //nolint:sqlcheck // compile-time corpus accessors
 			return result, err
-		} //nolint:sqlcheck // compile-time corpus accessors
+		}
 	}
 	if err := reconcileCoverageTx(ctx, conn, corpus, modelID); err != nil {
 		return result, err

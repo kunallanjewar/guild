@@ -117,6 +117,8 @@ type Deps struct {
 	// (e.g. quest_post with spec=). Nil means the feature is unavailable
 	// for that surface / test setup.
 	OpenLoreDB func(ctx context.Context) (*sql.DB, error)
+	// OpenQuestDB provides the quest corpus for combined embedding health.
+	OpenQuestDB func(ctx context.Context) (*sql.DB, error)
 	// EvaluateHints, when non-nil, is called by the MCP handler wrapper
 	// after each successful tool invocation. Returns a HintFire the
 	// wrapper formats and prepends/appends to the tool's output body.

@@ -329,7 +329,7 @@ func seedQuestForAutoBackfill(t *testing.T, path string, count int) {
 		// Trigger tasks_fts_status_ai populates tasks_fts_rows; guard
 		// with INSERT OR IGNORE so an already-populated row is fine.
 		if _, err := db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO tasks_fts_rows (task_id) VALUES (?)`,
+			`INSERT OR IGNORE INTO tasks_fts_rows (project_id,task_id) VALUES ('p',?)`,
 			taskID,
 		); err != nil {
 			t.Fatalf("seed tasks_fts_rows %s: %v", taskID, err)
@@ -938,17 +938,17 @@ func seedQuestHistoricalRows(t *testing.T, path string, count int) {
 	// + body. Production already applied this once via storage.Migrate;
 	// re-running it after the historical seed is what closes the gap.
 	if _, err := db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO tasks_fts_rows (task_id)
-		SELECT DISTINCT task_id FROM task_status;
+		INSERT OR IGNORE INTO tasks_fts_rows (project_id,task_id)
+		SELECT project_id,task_id FROM task_status;
 	`); err != nil {
 		t.Fatalf("re-run migration 006 INSERT: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		UPDATE tasks_fts_rows
 		SET body = COALESCE((
-		  SELECT group_concat(tn.note, ' ')
+		  SELECT group_concat(tn.note, char(10))
 		  FROM task_notes tn
-		  WHERE tn.task_id = tasks_fts_rows.task_id
+		  WHERE tn.project_id=tasks_fts_rows.project_id AND tn.task_id = tasks_fts_rows.task_id
 		    AND tn.note LIKE '[spec]%'
 		), '')
 		WHERE body = '';
@@ -1011,7 +1011,7 @@ func seedQuestSilentSuccessShape(t *testing.T, path string, bigStatusCount, fewB
 	for i := 1; i <= fewBridgeCount; i++ {
 		taskID := "QUEST-S" + intToStr(i)
 		if _, err := db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO tasks_fts_rows (task_id, body) VALUES (?, ?)`,
+			`INSERT OR IGNORE INTO tasks_fts_rows (project_id,task_id, body) VALUES ('p',?, ?)`,
 			taskID, "[spec] subject: bridged quest "+intToStr(i),
 		); err != nil {
 			t.Fatalf("seed bridge %s: %v", taskID, err)

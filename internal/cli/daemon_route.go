@@ -280,6 +280,7 @@ func newDaemonExecRegistry(questEmbed, loreEmbed any) *command.ExecRegistry {
 	loreDeps := func(_ context.Context, cwd string) command.Deps {
 		d := command.Deps{
 			OpenDB:      openLoreDB,
+			OpenQuestDB: openQuestDB,
 			ResolveProj: resolveProjAt(cwd, openLoreDB),
 			Now:         time.Now,
 			// Same decay-window threading as questDeps: lore inscribe,

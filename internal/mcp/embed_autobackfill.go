@@ -163,8 +163,7 @@ func (g *backfillGate) maybeTrigger(deps *lore.EmbedDeps, logger *slog.Logger) {
 }
 
 // runAutoBackfill is the body of the once-guarded trigger. For each
-// registered corpus target: decide whether to act (pending > 0 and
-// coverage < 0.90) and if so spawn a per-corpus goroutine. Waits for
+// registered corpus target: decide whether to act (repairable rows remain) and if so spawn a per-corpus goroutine. Waits for
 // every goroutine to finish before closing done so tests can
 // deterministically assert completion. insertHook is the gate's
 // test-only insert seam, nil in production.
@@ -177,7 +176,7 @@ func runAutoBackfill(ctx context.Context, targets []autoBackfillTarget, deps *lo
 		if !ok {
 			continue
 		}
-		if pending <= 0 || coverage >= backfillCoverageFloor {
+		if pending <= 0 {
 			// Healthy or nothing to do. No slog noise; the healthy
 			// case is the common path and should stay quiet.
 			continue
@@ -193,8 +192,7 @@ func runAutoBackfill(ctx context.Context, targets []autoBackfillTarget, deps *lo
 
 // backfillCoverageFloor is the ADR-003 gate: coverage >= 0.90 means the
 // corpus is considered "live" and appraise can safely use the vector
-// arm. Below the floor we assume the corpus needs help. Mirrors
-// internal/lore/embed/health.go's backfillCoverageThreshold.
+// arm. Below the floor we assume the corpus needs help. Used only to classify the final outcome; repair scans continue to full freshness.
 const backfillCoverageFloor = 0.90
 
 // assessCorpus decides whether a corpus wants a backfill. Counts live
@@ -218,56 +216,19 @@ func assessCorpus(ctx context.Context, tgt autoBackfillTarget, logger *slog.Logg
 	}
 	defer func() { _ = db.Close() }()
 
-	activePred := tgt.corpus.ActivePredicate()
-	if activePred == "" {
-		activePred = "1=1"
-	}
-	// den = number of active entities eligible for embedding.
-	denQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s`, //nolint:gosec // G201: table + predicate are compile-time corpus accessors, not user input.
-		tgt.corpus.EntityTable(), activePred)
-	var den int64
-	if err := db.QueryRowContext(readCtx, denQuery).Scan(&den); err != nil { //nolint:sqlcheck // table + predicate are compile-time corpus accessors.
-		logger.Warn("auto-backfill assess: count den failed",
-			slog.String("corpus", tgt.corpus.Name()),
-			slog.String("err", err.Error()),
-		)
+	modelID, err := readMetaValue(readCtx, db, tgt.corpus.MetaKey(embed.FieldEmbedderModelID))
+	if err != nil {
 		return 0, 0, false
 	}
-	// num = number of vector rows the corpus already has. A missing
-	// vector table surfaces as a SQL error; surface as skip rather than
-	// blow up the whole trigger.
-	numQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s`, tgt.corpus.VectorTable()) //nolint:gosec // G201: table name is a compile-time corpus accessor, not user input.
-	var num int64
-	if err := db.QueryRowContext(readCtx, numQuery).Scan(&num); err != nil { //nolint:sqlcheck // table name is a compile-time corpus accessor.
-		logger.Warn("auto-backfill assess: count num failed",
-			slog.String("corpus", tgt.corpus.Name()),
-			slog.String("err", err.Error()),
-		)
+	measured, err := embed.ReadCoverage(readCtx, db, tgt.corpus, modelID, nil)
+	if err != nil {
+		logger.Warn("auto-backfill assess: coverage failed", "corpus", tgt.corpus.Name(), "err", err)
 		return 0, 0, false
 	}
+	emitSanityWarn(readCtx, db, tgt.corpus, measured.Eligible, logger)
+	pending = measured.Eligible - measured.Fresh
+	coverage = measured.Ratio()
 
-	// Silent-success guard (QUEST-246, LORE-404): if den is implausibly
-	// small relative to obvious live activity in the same DB, the corpus
-	// is reporting a healthy num/den that masks a broken entity-source
-	// wiring. Without this guard, a 9/9 = 100% coverage with 240+ real
-	// quests in task_status looks healthy and auto-backfill exits silent.
-	// emitSanityWarn reads a corpus-specific reference count and logs one
-	// WARN line when the den/reference ratio falls below 0.10; the line
-	// names the observed numbers and points operators at the diagnostic
-	// SQL. The check is best-effort: any read error (e.g. the reference
-	// table missing) is silently skipped so the outer assess flow does
-	// not regress on corpora that opt out.
-	emitSanityWarn(readCtx, db, tgt.corpus, den, logger)
-
-	// Empty corpus (zero active entities): nothing to backfill.
-	if den <= 0 {
-		return 0, 1.0, true
-	}
-	pending = den - num
-	if pending < 0 {
-		pending = 0
-	}
-	coverage = float64(num) / float64(den)
 	return pending, coverage, true
 }
 
@@ -502,7 +463,7 @@ func runOneCorpusBackfill(ctx context.Context, tgt autoBackfillTarget, deps *lor
 			slog.Float64("coverage_after", finalCoverage),
 		)
 
-		if finalCoverage >= backfillCoverageFloor {
+		if finalCoverage >= 1 {
 			break
 		}
 		if res.Embedded == 0 {
@@ -618,9 +579,7 @@ func finalizeCorpusState(ctx context.Context, db *sql.DB, corpus embed.VectorCor
 
 	man := embed.CurrentManifest()
 	identity := man.Identity
-	if identity.ModelID == "" {
-		identity.ModelID = modelID
-	}
+	identity.ModelID = modelID
 	if identity.Dim == 0 {
 		identity.Dim = embed.Dim
 	}

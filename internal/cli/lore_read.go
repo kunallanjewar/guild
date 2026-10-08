@@ -567,7 +567,8 @@ func init() {
 // resolved *EmbedDeps per ADR-003 nil-safety.
 func buildCLILoreDeps() command.Deps {
 	return command.Deps{
-		OpenDB: openLoreDB,
+		OpenDB:      openLoreDB,
+		OpenQuestDB: openQuestDB,
 		ResolveProj: func(ctx context.Context, argProject string) (string, error) {
 			db, err := openLoreDB(ctx)
 			if err != nil {
