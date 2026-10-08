@@ -15,7 +15,7 @@ import (
 )
 
 // embedTestModelID is the model identity stamped on test vector rows.
-const embedTestModelID = "test-model-v1"
+const embedTestModelID = "bge-small-en-v1.5-int8-cls"
 
 // embedTestDeps wires a deterministic embedder, the fake the embed
 // package ships for paths that need an embedder shape without ORT.
@@ -43,6 +43,7 @@ func beginTestPass(ctx context.Context, t *testing.T, db *sql.DB) int64 {
 func seedLoreEntries(t *testing.T, db *sql.DB, n, offset int) {
 	t.Helper()
 	ctx := context.Background()
+	seedEmbeddingIdentity(t, db, embed.LoreCorpus{})
 	if _, err := db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO projects (id, path) VALUES ('p', '/tmp/p')`); err != nil {
 		t.Fatalf("seed project: %v", err)
@@ -65,6 +66,7 @@ func seedLoreEntries(t *testing.T, db *sql.DB, n, offset int) {
 func seedQuests(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
 	ctx := context.Background()
+	seedEmbeddingIdentity(t, db, embed.QuestCorpus{})
 	if _, err := db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO projects (id, path) VALUES ('p', '/tmp/p')`); err != nil {
 		t.Fatalf("seed project: %v", err)
@@ -85,7 +87,7 @@ func seedQuests(t *testing.T, db *sql.DB, n int) {
 			t.Fatalf("seed task_notes %s: %v", taskID, err)
 		}
 		if _, err := db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO tasks_fts_rows (task_id) VALUES (?)`,
+			`INSERT OR IGNORE INTO tasks_fts_rows (project_id,task_id) VALUES ('p',?)`,
 			taskID,
 		); err != nil {
 			t.Fatalf("seed tasks_fts_rows %s: %v", taskID, err)
@@ -215,17 +217,15 @@ func TestEmbedStep_BackfillsBothCorpora(t *testing.T) {
 	}
 }
 
-// TestEmbedStep_ActsAboveCoverageFloor locks the divergence from the
-// startup auto-backfill: that trigger stops caring at 90% coverage,
-// this step acts whenever pending > 0. Coverage is seeded AT the 0.90
-// floor and the step must still embed the remaining entity.
+// TestEmbedStep_ActsAboveCoverageFloor ensures an eligible missing vector
+// is repaired even when existing coverage already clears the retrieval gate.
 func TestEmbedStep_ActsAboveCoverageFloor(t *testing.T) {
 	ctx := context.Background()
 	loreDB := openSleepDB(t)
 	seedLoreEntries(t, loreDB, 9, 0)
 
 	// Pre-embed the first nine entries, then add a tenth: coverage sits
-	// at 9/10 = 0.90, exactly where the startup trigger goes quiet.
+	// at 9/10 = 0.90. Maintenance must repair the remaining row.
 	if _, err := embed.Backfill(ctx, embed.BackfillOptions{
 		DB:       loreDB,
 		Corpus:   embed.LoreCorpus{},
@@ -417,11 +417,9 @@ func TestEmbedStep_CancellationJournalsPartialProgress(t *testing.T) {
 	}
 }
 
-// TestEmbedStep_RerunNeverOverwritesVectors locks the ADR-003 additive
-// invariant at the step level: re-running the step never touches
-// existing vector rows (INSERT OR IGNORE semantics), and a zero-pending
-// rerun journals nothing.
-func TestEmbedStep_RerunNeverOverwritesVectors(t *testing.T) {
+// TestEmbedStep_RerunPreservesFreshVectors ensures repair leaves valid,
+// content-fresh rows untouched and journals no work for a healthy corpus.
+func TestEmbedStep_RerunPreservesFreshVectors(t *testing.T) {
 	ctx := context.Background()
 	loreDB := openSleepDB(t)
 	questDB := openSleepDB(t) // zero quests throughout
@@ -452,13 +450,13 @@ func TestEmbedStep_RerunNeverOverwritesVectors(t *testing.T) {
 		t.Fatalf("rows after first run = %d, want 3", len(before))
 	}
 
-	// Plant a sentinel on one existing row: if any later run rewrote
-	// the row (INSERT OR REPLACE semantics), the sentinel would vanish.
+	// Plant a timestamp sentinel without making the source hash stale.
 	if _, err := loreDB.ExecContext(ctx,
-		`UPDATE lore_vectors SET content_hash = 'sentinel' WHERE entry_id = 1`); err != nil {
+		`UPDATE lore_vectors SET encoded_at = 123 WHERE entry_id = 1`); err != nil {
 		t.Fatalf("plant sentinel: %v", err)
 	}
 
+	before = readLoreVectorRows(t, loreDB)
 	// A new pending entity appears between passes; the second run must
 	// add exactly one row and leave the originals untouched.
 	seedLoreEntries(t, loreDB, 1, 3)
@@ -480,9 +478,8 @@ func TestEmbedStep_RerunNeverOverwritesVectors(t *testing.T) {
 			t.Errorf("entry %d vector row rewritten across reruns", entryID)
 		}
 	}
-	if after[1].contentHash != "sentinel" {
-		t.Errorf("sentinel content_hash overwritten: got %q, want %q (INSERT OR IGNORE violated)",
-			after[1].contentHash, "sentinel")
+	if after[1].encodedAt != 123 {
+		t.Fatalf("fresh timestamp sentinel overwritten: %d", after[1].encodedAt)
 	}
 
 	// Third run with nothing pending anywhere: quiet no-op, no journal rows.
@@ -581,5 +578,124 @@ func TestEmbedStep_NilQuestDBJournalsSkip(t *testing.T) {
 	}
 	if detail.Corpus != "quest" || detail.Skipped != skipReasonQuestDBNotWired {
 		t.Errorf("skip detail = %+v, want corpus=quest skipped=%s", detail, skipReasonQuestDBNotWired)
+	}
+}
+
+func seedEmbeddingIdentity(t *testing.T, db *sql.DB, corpus embed.VectorCorpus) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, corpus.MetaKey(embed.FieldEmbedderModelID), embedTestModelID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEmbedStepRepairsExistingVectors(t *testing.T) {
+	for _, name := range []string{"lore", "quest"} {
+		for _, damage := range []string{"stale-content", "wrong-model", "wrong-dim", "wrong-blob"} {
+			t.Run(name+"/"+damage, func(t *testing.T) {
+				ctx := context.Background()
+				loreDB, questDB := openSleepDB(t), openSleepDB(t)
+				db, corpus := loreDB, embed.VectorCorpus(embed.LoreCorpus{})
+				if name == "lore" {
+					seedLoreEntries(t, loreDB, 1, 0)
+				} else {
+					db = questDB
+					corpus = embed.QuestCorpus{}
+					seedQuests(t, questDB, 1)
+				}
+				if _, err := embed.Backfill(ctx, embed.BackfillOptions{DB: db, Corpus: corpus, Embedder: embed.NewDeterministicEmbedder(), ModelID: embedTestModelID}); err != nil {
+					t.Fatal(err)
+				}
+				// Fixed table identifiers selected by this test, never user input.
+				table := "lore_vectors"
+				if name == "quest" {
+					table = "quest_vectors"
+				}
+				assignment := "content_hash='older-source'"
+				switch damage {
+				case "wrong-model":
+					assignment = "model_id='older-model'"
+				case "wrong-dim":
+					assignment = "dim=1"
+				case "wrong-blob":
+					assignment = "vec=X'01'"
+				}
+				if _, err := db.Exec(`UPDATE ` + table + ` SET ` + assignment); err != nil { //nolint:gosec,sqlcheck // compile-time test table and assignments
+					t.Fatal(err)
+				}
+				before, err := embed.ReadCoverage(ctx, db, corpus, embedTestModelID, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if before.Eligible != 1 || before.Missing != 0 || before.Fresh != 0 {
+					t.Fatalf("repair fixture=%+v", before)
+				}
+				if damage == "stale-content" && before.Valid != 1 {
+					t.Fatal("stale fixture must have 100 percent model/shape coverage")
+				}
+				passID := beginTestPass(ctx, t, loreDB)
+				report, err := (EmbedStep{}).Run(ctx, &PassContext{LoreDB: loreDB, QuestDB: questDB, Embed: embedTestDeps(), Logger: quietLogger(), PassID: passID, Trigger: TriggerAutopass})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if report.OpsApplied != 1 {
+					t.Fatalf("repair not applied: %+v", report)
+				}
+				after, err := embed.ReadCoverage(ctx, db, corpus, embedTestModelID, nil)
+				if err != nil || after.Fresh != 1 {
+					t.Fatalf("repair coverage=%+v err=%v", after, err)
+				}
+				ops, err := PassOps(ctx, loreDB, passID)
+				if err != nil || len(ops) != 1 {
+					t.Fatalf("repair journal=%+v err=%v", ops, err)
+				}
+				var detail embedOpDetail
+				if err := json.Unmarshal([]byte(ops[0].Detail), &detail); err != nil {
+					t.Fatal(err)
+				}
+				if detail.PendingBefore != 1 || detail.Embedded != 1 || detail.Skipped != 0 || detail.Failed != 0 {
+					t.Fatalf("repair counts=%+v", detail)
+				}
+			})
+		}
+	}
+}
+
+type sourceEditingEmbedder struct{ db *sql.DB }
+
+func (e sourceEditingEmbedder) Dimension() int { return embed.Dim }
+func (e sourceEditingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if _, err := e.db.ExecContext(ctx, `UPDATE entries SET summary='edited during encode'`); err != nil {
+		return nil, err
+	}
+	return embed.NewDeterministicEmbedder().Embed(ctx, text)
+}
+
+func TestEmbedStepJournalsConcurrentEditAsSkipped(t *testing.T) {
+	ctx := context.Background()
+	db := openSleepDB(t)
+	seedLoreEntries(t, db, 1, 0)
+	passID := beginTestPass(ctx, t, db)
+	deps := embedTestDeps()
+	deps.Embedder = sourceEditingEmbedder{db: db}
+	report, err := (EmbedStep{}).Run(ctx, &PassContext{LoreDB: db, QuestDB: openSleepDB(t), Embed: deps, Logger: quietLogger(), PassID: passID, Trigger: TriggerAutopass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OpsApplied != 0 {
+		t.Fatalf("stale encode marked applied: %+v", report)
+	}
+	ops, err := PassOps(ctx, db, passID)
+	if err != nil || len(ops) != 1 {
+		t.Fatalf("skip journal=%+v err=%v", ops, err)
+	}
+	if ops[0].Applied || ops[0].Inverse != "" {
+		t.Fatal("skipped encode has mutation or inverse")
+	}
+	var detail embedOpDetail
+	if err := json.Unmarshal([]byte(ops[0].Detail), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.PendingBefore != 1 || detail.Embedded != 0 || detail.Skipped != 1 || detail.Failed != 0 {
+		t.Fatalf("skip counts=%+v", detail)
 	}
 }

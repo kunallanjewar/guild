@@ -16,19 +16,15 @@ import (
 // running embed.Backfill against every registered corpus (lore on
 // pc.LoreDB, quest on pc.QuestDB).
 //
-// Acting condition: pending > 0, full stop. The startup auto-backfill
-// in internal/mcp deliberately stops caring at 90% coverage because
-// startup work must stay cheap; that floor is a latency tradeoff, not a
-// correctness bound. Idle time has no such constraint, so this step
-// acts on any pending entity and lets the pass wall budget (threaded
-// through ctx) bound the work. embed.Backfill checks ctx.Err per entry,
-// so mid-flight cancellation is safe and partial progress is journaled.
+// Acting condition: any eligible source with a missing, content-stale, or
+// incompatible vector. Startup and idle repair use the same coverage API;
+// the pass wall budget bounds this step's encoding work. Cancellation is safe
+// and partial persisted progress is journaled.
 //
-// Safety: every vector write inside embed.Backfill is INSERT OR IGNORE
-// (ADR-003 invariant 1), so racing a concurrently-running startup
-// auto-backfill in a no-daemon process wastes cycles but cannot corrupt
-// state. The op is additive, which is why the HYBRID gate classifies
-// OpEmbedBackfill as PolicyAuto (see policy.go).
+// Safety: Backfill checks model identity, canonical source text and eligibility
+// under the writer lock before inserting or repairing a row. Racing repair
+// passes cannot overwrite a concurrent source edit. Derived vector repair is
+// classified PolicyAuto by the HYBRID gate (see policy.go).
 type EmbedStep struct{}
 
 // Compile-time check: EmbedStep must satisfy Step.
@@ -57,10 +53,13 @@ const (
 
 // embedOpDetail is the detail JSON for one corpus backfill op.
 type embedOpDetail struct {
-	Corpus        string `json:"corpus"`
-	PendingBefore int64  `json:"pending_before"`
-	Embedded      int    `json:"embedded"`
-	Failed        int    `json:"failed"`
+	Corpus string `json:"corpus"`
+	// PendingBefore includes missing, stale and incompatible repair candidates.
+	PendingBefore int64 `json:"pending_before"`
+	// Embedded counts actual persisted insertions and repairs.
+	Embedded int `json:"embedded"`
+	Skipped  int `json:"skipped"`
+	Failed   int `json:"failed"`
 	// Cancelled is true when the pass budget (or caller cancellation)
 	// stopped the backfill mid-flight; the counts above then describe
 	// partial progress.
@@ -77,9 +76,9 @@ type embedSkipDetail struct {
 }
 
 // embedOpInverse records how to manually reverse an applied backfill.
-// Vectors are derived data, so reversal is "delete the rows this run
-// inserted"; encoded_at_gte bounds them because insertVectorRow stamps
-// wall-clock encoded_at on every row.
+// Vectors are derived data. Deleting recently encoded rows schedules another
+// repair; it does not restore replaced vector values. The timestamp boundary
+// is approximate and can include writes from a concurrent process.
 type embedOpInverse struct {
 	VectorTable  string `json:"vector_table"`
 	EncodedAtGTE int64  `json:"encoded_at_gte"`
@@ -101,8 +100,7 @@ func (EmbedStep) Run(ctx context.Context, pc *PassContext) (StepReport, error) {
 	}
 	logger := pc.logger()
 
-	// Consult the HYBRID gate even though OpEmbedBackfill is additive
-	// by construction: a future taxonomy change must not leave this
+	// Consult the HYBRID gate for derived-data repair: a future taxonomy change must not leave this
 	// step silently mutating against policy.
 	if Classify(OpEmbedBackfill) != PolicyAuto {
 		return StepReport{}, fmt.Errorf("sleep: embed step: op %s is no longer classified %s; step must not mutate unattended", OpEmbedBackfill, PolicyAuto)
@@ -158,12 +156,12 @@ func (EmbedStep) Run(ctx context.Context, pc *PassContext) (StepReport, error) {
 		}
 		if pc.Caps.MaxAutoOps > 0 && report.OpsApplied >= pc.Caps.MaxAutoOps {
 			// Per-pass auto-op cap exhausted; defer this corpus to the
-			// next pass. The LEFT JOIN pending scan picks it up again.
+			// next pass. The source-derived coverage scan picks it up again.
 			notes = append(notes, name+": deferred (auto-op cap reached)")
 			continue
 		}
 
-		pending, err := countPending(ctx, tgt.db, tgt.corpus)
+		pending, err := countPending(ctx, tgt.db, tgt.corpus, pc.Embed.ModelID)
 		if err != nil {
 			if ctx.Err() != nil {
 				report.Note = joinNotes(notes)
@@ -199,6 +197,7 @@ func (EmbedStep) Run(ctx context.Context, pc *PassContext) (StepReport, error) {
 		if res != nil {
 			detail.Embedded = res.Embedded
 			detail.Failed = res.Failed
+			detail.Skipped = res.Skipped
 		}
 		if backErr != nil && !cancelled {
 			detail.Error = backErr.Error()
@@ -219,7 +218,7 @@ func (EmbedStep) Run(ctx context.Context, pc *PassContext) (StepReport, error) {
 				VectorTable:  tgt.corpus.VectorTable(),
 				EncodedAtGTE: startUnix,
 				Rows:         res.Embedded,
-				Note:         "vectors are derived data: deleting these rows re-pends the entities for the next backfill; run a coverage reconcile afterwards",
+				Note:         "deleting recently encoded rows schedules recomputation; replaced values are not restored, and the timestamp boundary may include concurrent writes",
 			})
 		}
 		if err := recordEmbedOp(ctx, pc, op); err != nil {
@@ -229,7 +228,7 @@ func (EmbedStep) Run(ctx context.Context, pc *PassContext) (StepReport, error) {
 			report.OpsApplied++
 		}
 		if res != nil {
-			notes = append(notes, fmt.Sprintf("%s: %d embedded, %d failed", name, res.Embedded, res.Failed))
+			notes = append(notes, fmt.Sprintf("%s: %d inserted or repaired, %d skipped, %d failed", name, res.Embedded, res.Skipped, res.Failed))
 		}
 
 		if cancelled {
@@ -249,26 +248,14 @@ func (EmbedStep) Run(ctx context.Context, pc *PassContext) (StepReport, error) {
 	return report, errors.Join(errs...)
 }
 
-// countPending counts active entities without a vector row, templated
-// off the corpus accessors exactly like embed's scanPending (LEFT JOIN
-// on the vector table, filtered by the corpus's active predicate). The
-// startup auto-backfill keeps an equivalent package-private assessment
-// helper in internal/mcp; this package must not import internal/mcp,
-// so the tiny query is replicated here instead.
-func countPending(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus) (int64, error) {
-	activePred := corpus.ActivePredicate()
-	if activePred == "" {
-		activePred = "1=1"
-	}
-	query := fmt.Sprintf( //nolint:gosec // G201: all substitutions are compile-time corpus accessors, not user input.
-		`SELECT COUNT(*) FROM %[1]s e LEFT JOIN %[2]s v ON v.entry_id = e.%[3]s WHERE v.entry_id IS NULL AND e.%[4]s`,
-		corpus.EntityTable(), corpus.VectorTable(), corpus.EntityIDColumn(), activePred,
-	)
-	var n int64
-	if err := db.QueryRowContext(ctx, query).Scan(&n); err != nil { //nolint:sqlcheck // all parts are compile-time corpus accessors.
+// countPending measures repair candidates from current eligible source rows,
+// including existing vectors whose model, shape or content hash is stale.
+func countPending(ctx context.Context, db *sql.DB, corpus embed.VectorCorpus, modelID string) (int64, error) {
+	coverage, err := embed.ReadCoverage(ctx, db, corpus, modelID, nil)
+	if err != nil {
 		return 0, err
 	}
-	return n, nil
+	return coverage.Missing + coverage.Stale + coverage.Invalid, nil
 }
 
 // recordEmbedOp journals op through a cancellation-shielded context:
