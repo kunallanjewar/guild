@@ -70,7 +70,7 @@ func TestQuestSearch_MCPProjectIsolation(t *testing.T) {
 	}
 	// Parse only actual result rows. The response header echoes the query,
 	// which must never satisfy a positive subject or relevance assertion.
-	resultRE := regexp.MustCompile(`(?m)^  (QUEST-\d+) \[[^\]]+\] (.+)$`)
+	resultRE := regexp.MustCompile(`(?m)^ {2}(QUEST-\d+) \[[^\]]+\] (.+)$`)
 	search := func(pid, query, wantedSubject string) {
 		t.Helper()
 		args := map[string]any{"query": query, "limit": 10}
