@@ -106,6 +106,7 @@ func newOpts(t *testing.T, buf *bytes.Buffer) InitOptions {
 		In:           &bytes.Buffer{},
 		LoreDBPath:   loreDB,
 		QuestDBPath:  questDB,
+		clients:      []Client{}, // scaffold tests must not discover host clients
 		executableFn: fakeExecutable(t),
 	}
 }
@@ -315,6 +316,7 @@ func TestInit_YesFlag_NonInteractive(t *testing.T) {
 		In:           &bytes.Buffer{},
 		LoreDBPath:   loreDB,
 		QuestDBPath:  questDB,
+		clients:      []Client{},
 		executableFn: fakeExecutable(t),
 	})
 	if err != nil {
@@ -344,6 +346,7 @@ func TestInit_DryRun_NoChanges(t *testing.T) {
 		In:          &bytes.Buffer{},
 		LoreDBPath:  loreDB,
 		QuestDBPath: questDB,
+		clients:     []Client{},
 	})
 	if err != nil {
 		t.Fatalf("Init --dry-run: %v", err)
@@ -380,6 +383,7 @@ func TestInit_PrintAgentsMD_EmitsTemplateOnly(t *testing.T) {
 		In:            &bytes.Buffer{},
 		LoreDBPath:    loreDB,
 		QuestDBPath:   questDB,
+		clients:       []Client{},
 	})
 	if err != nil {
 		t.Fatalf("Init --print-agents-md: %v", err)
@@ -457,6 +461,7 @@ func TestInit_MultipleRuns_NoDuplicateSections(t *testing.T) {
 			In:           &bytes.Buffer{},
 			LoreDBPath:   loreDB,
 			QuestDBPath:  questDB,
+			clients:      []Client{},
 			executableFn: fakeExecutable(t),
 		}); err != nil {
 			t.Fatalf("Init: %v", err)
@@ -473,6 +478,31 @@ func TestInit_MultipleRuns_NoDuplicateSections(t *testing.T) {
 	count := strings.Count(string(content), agentsSectionMarker)
 	if count != 1 {
 		t.Errorf("section marker appears %d times; want exactly 1\n%s", count, content)
+	}
+}
+
+// A contributor may have real MCP clients on PATH. Scaffolding fixtures
+// must not probe or register them with a temporary Guild executable.
+func TestInit_ScaffoldDoesNotInvokeHostClients(t *testing.T) {
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "client-invoked")
+	for _, name := range []string{"claude", "cursor", "codex"} {
+		path := filepath.Join(binDir, name)
+		script := "#!/bin/sh\nprintf invoked >> '" + strings.ReplaceAll(marker, "'", "'\\''") + "'\n"
+		if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var out bytes.Buffer
+	if _, err := Init(context.Background(), makeRepo(t, "scaffold-only"), newOpts(t, &out)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("scaffold test invoked a detected host client: %v", err)
 	}
 }
 
