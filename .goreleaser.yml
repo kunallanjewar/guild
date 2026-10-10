@@ -201,7 +201,7 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
     homepage: "https://github.com/mathomhaus/guild"
-    description: "persistent cognition for AI agents — task + knowledge lifecycle"
+    description: "Persistent cognition for AI agents — task + knowledge lifecycle"
     license: "Apache-2.0"
     commit_author:
       name: goreleaser-bot
@@ -209,19 +209,28 @@ homebrew_casks:
     commit_msg_template: "chore: update guild cask to {{.Tag}}"
     binaries:
       - guild
-    # xattr hook removes macOS quarantine on unsigned binaries.
-    # guild is a CLI tool (not a macOS .app), so this is required for
-    # smooth installation on macOS without Gatekeeper warnings.
-    hooks:
-      post:
-        install: |
+    # Preserve quarantine handling across Homebrew versions. GoReleaser
+    # 2.15 wraps hooks in deprecated flight blocks; custom_block lets us
+    # choose the declarative API when available and keep older taps usable.
+    # Escape Homebrew's staged_path token through GoReleaser's template.
+    custom_block: |
+      # Older Homebrew answers respond_to? through a permissive method_missing.
+      if self.class.method_defined?(:postflight_steps)
+        postflight_steps do
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/guild"]
+          end
+        end
+      else
+        # Bind the older DSL explicitly only on versions that need it.
+        method(:postflight).call do
           if OS.mac?
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/guild"]
           end
+        end
+      end
     # skip_upload: auto skips publishing pre-release tags (v1.0.0-rc1 etc.)
     skip_upload: auto
-    url:
-      verified: "github.com/mathomhaus/guild"
 
 # ─── snapshot ────────────────────────────────────────────────────────────────
 #
